@@ -99,6 +99,15 @@ class HubSpotClient:
     ) -> APIResponse:
         return await self._request("PATCH", path, portal_id, body, expected_scopes)
 
+    async def put(
+        self,
+        path: str,
+        portal_id: str,
+        body: dict[str, Any] | None = None,
+        expected_scopes: list[str] | None = None,
+    ) -> APIResponse:
+        return await self._request("PUT", path, portal_id, body, expected_scopes)
+
     async def delete(
         self, path: str, portal_id: str, expected_scopes: list[str] | None = None
     ) -> APIResponse:
