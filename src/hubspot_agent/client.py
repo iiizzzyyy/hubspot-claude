@@ -82,12 +82,18 @@ class HubSpotClient:
         portal_id: str,
         body: dict[str, Any] | None = None,
         expected_scopes: list[str] | None = None,
+        data: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
     ) -> APIResponse:
         await self._enforce_rate_limit()
         await self._get_fresh_token()
         kwargs: dict[str, Any] = {}
         if body is not None:
             kwargs["json"] = body
+        if data is not None:
+            kwargs["data"] = data
+        if files is not None:
+            kwargs["files"] = files
         resp = await self._client.request(method, path, **kwargs)
         if resp.status_code == 401:
             await self._get_fresh_token(force=True)
@@ -179,6 +185,16 @@ class HubSpotClient:
         self, path: str, portal_id: str, expected_scopes: list[str] | None = None
     ) -> APIResponse:
         return await self._request("DELETE", path, portal_id, expected_scopes=expected_scopes)
+
+    async def post_files(
+        self,
+        path: str,
+        portal_id: str,
+        data: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+        expected_scopes: list[str] | None = None,
+    ) -> APIResponse:
+        return await self._request("POST", path, portal_id, data=data, files=files, expected_scopes=expected_scopes)
 
     async def close(self) -> None:
         await self._client.aclose()

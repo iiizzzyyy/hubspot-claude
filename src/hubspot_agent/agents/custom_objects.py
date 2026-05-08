@@ -16,9 +16,10 @@ _TOOL_NAMES = [
 ]
 
 _DOMAIN = (
-    "You manage contacts, companies, deals, and tickets in HubSpot. "
-    "You retrieve, search, create, update, and delete records, "
-    "and perform batch upserts with input-side deduplication."
+    "You manage custom object records in HubSpot. "
+    "You retrieve, search, create, update, and delete custom object records "
+    "by their object type ID. Always verify the custom object type exists "
+    "before attempting operations."
 )
 
 
@@ -29,16 +30,16 @@ def _build_domain(portal_config: PortalConfig | None = None) -> str:
             cache = SchemaCache(portal_config.portal_id)
             custom = cache.list_custom_object_names()
             if custom:
-                domain += f" You also manage these custom object types: {', '.join(custom)}."
+                domain += f" Available custom types: {', '.join(custom)}."
         except Exception:
             pass
     return domain
 
 
-def get_objects_agent_prompt(portal_config: PortalConfig | None = None) -> AgentPrompt:
+def get_custom_objects_agent_prompt(portal_config: PortalConfig | None = None) -> AgentPrompt:
     tools = [t for name in _TOOL_NAMES if (t := get_tool(name)) is not None]
     return build_agent_prompt(
-        agent_name="Objects Agent",
+        agent_name="Custom Objects Agent",
         domain_description=_build_domain(portal_config),
         available_tools=tools,
         portal_config=portal_config,

@@ -8,17 +8,23 @@ from hubspot_agent.client import HubSpotClient
 from hubspot_agent.errors import HubSpotError, RateLimitError, ScopeError
 from hubspot_agent.progress import ProgressTracker
 from hubspot_agent.tools import tool
+from hubspot_agent.cache import SchemaCache
 from hubspot_agent.validation import validate_properties
 
 _VALID_OBJECT_TYPES = frozenset({"contacts", "companies", "deals", "tickets"})
 
 
-def _validate_object_type(object_type: str) -> None:
-    if object_type not in _VALID_OBJECT_TYPES:
-        raise ValueError(
-            f"Invalid object_type '{object_type}'. "
-            f"Must be one of: {', '.join(sorted(_VALID_OBJECT_TYPES))}"
-        )
+def _validate_object_type(object_type: str, portal_id: str) -> None:
+    if object_type in _VALID_OBJECT_TYPES:
+        return
+    cache = SchemaCache(portal_id)
+    if cache.get(object_type) is not None:
+        return
+    raise ValueError(
+        f"Invalid object_type '{object_type}'. "
+        f"Must be one of: {', '.join(sorted(_VALID_OBJECT_TYPES))} "
+        f"or a discovered custom object type."
+    )
 
 
 @tool(name="hubspot_get_object", description="Retrieve a HubSpot object by ID.")
@@ -28,7 +34,7 @@ async def hubspot_get_object(
     client: HubSpotClient,
     portal_id: str,
 ) -> dict[str, Any]:
-    _validate_object_type(object_type)
+    _validate_object_type(object_type, portal_id)
     try:
         resp = await client.get(
             f"/crm/v3/objects/{object_type}/{quote(object_id, safe='')}",
@@ -47,7 +53,7 @@ async def hubspot_search_objects(
     client: HubSpotClient,
     portal_id: str,
 ) -> dict[str, Any]:
-    _validate_object_type(object_type)
+    _validate_object_type(object_type, portal_id)
     try:
         resp = await client.post(
             f"/crm/v3/objects/{object_type}/search",
@@ -67,7 +73,7 @@ async def hubspot_create_object(
     client: HubSpotClient,
     portal_id: str,
 ) -> dict[str, Any]:
-    _validate_object_type(object_type)
+    _validate_object_type(object_type, portal_id)
     validation = validate_properties(object_type, properties, portal_id)
     if not validation["valid"]:
         return {
@@ -96,7 +102,7 @@ async def hubspot_update_object(
     client: HubSpotClient,
     portal_id: str,
 ) -> dict[str, Any]:
-    _validate_object_type(object_type)
+    _validate_object_type(object_type, portal_id)
     validation = validate_properties(object_type, properties, portal_id)
     if not validation["valid"]:
         return {
@@ -124,7 +130,7 @@ async def hubspot_delete_object(
     client: HubSpotClient,
     portal_id: str,
 ) -> dict[str, Any]:
-    _validate_object_type(object_type)
+    _validate_object_type(object_type, portal_id)
     try:
         resp = await client.delete(
             f"/crm/v3/objects/{object_type}/{quote(object_id, safe='')}",
@@ -172,7 +178,7 @@ async def hubspot_batch_upsert_objects(
     unique_key: str = "email",
     action_id: str | None = None,
 ) -> dict[str, Any]:
-    _validate_object_type(object_type)
+    _validate_object_type(object_type, portal_id)
     _, creates, updates = _partition_records(records, unique_key)
 
     import uuid

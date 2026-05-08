@@ -29,7 +29,6 @@ def test_validation_all_valid(cache, tmp_path):
         {"email": "test@example.com", "age": 30, "is_customer": True},
         "123",
         base_dir=tmp_path,
-        retry_with_refresh=False,
     )
     assert result["valid"] is True
     assert result["errors"] == []
@@ -41,7 +40,6 @@ def test_validation_unknown_property(cache, tmp_path):
         {"emial": "test@example.com"},
         "123",
         base_dir=tmp_path,
-        retry_with_refresh=False,
     )
     assert result["valid"] is False
     assert result["errors"][0]["reason"] == "unknown_property"
@@ -54,7 +52,6 @@ def test_validation_type_mismatch_string(cache, tmp_path):
         {"age": "thirty"},
         "123",
         base_dir=tmp_path,
-        retry_with_refresh=False,
     )
     assert result["valid"] is False
     assert "type_mismatch" in result["errors"][0]["reason"]
@@ -66,7 +63,6 @@ def test_validation_type_mismatch_bool(cache, tmp_path):
         {"is_customer": "yes"},
         "123",
         base_dir=tmp_path,
-        retry_with_refresh=False,
     )
     assert result["valid"] is False
     assert "type_mismatch" in result["errors"][0]["reason"]
@@ -78,33 +74,9 @@ def test_validation_no_schema(tmp_path):
         {"email": "test@example.com"},
         "123",
         base_dir=tmp_path,
-        retry_with_refresh=False,
     )
     assert result["valid"] is True
     assert result["errors"] == []
-    assert result["refreshed"] is False
-
-
-def test_validation_refresh_retry(cache, tmp_path):
-    # Seed cache, then invalidate it to force refresh path
-    cache.invalidate("contacts")
-    cache.set(
-        "contacts",
-        {
-            "results": [
-                {"name": "email", "type": "string"},
-                {"name": "new_field", "type": "string"},
-            ]
-        },
-    )
-    result = validate_properties(
-        "contacts",
-        {"new_field": "value"},
-        "123",
-        base_dir=tmp_path,
-        retry_with_refresh=True,
-    )
-    assert result["valid"] is True
 
 
 def test_type_compatible_string():
@@ -137,7 +109,6 @@ def test_validation_allows_none_value(cache, tmp_path):
         {"email": None},
         "123",
         base_dir=tmp_path,
-        retry_with_refresh=False,
     )
     assert result["valid"] is True
     assert result["errors"] == []
