@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
 from typing import Any
+
+from hubspot_agent.client import HubSpotClient
+from hubspot_agent.config import PortalConfig
+
+WARM_DOMAINS = ["contacts", "companies", "deals", "tickets"]
 
 
 class SchemaCache:
@@ -54,3 +60,27 @@ class SchemaCache:
 
     def refresh_domain(self, domain: str) -> None:
         self.invalidate(domain)
+
+
+async def warm_standard_schemas(portal_config: PortalConfig) -> SchemaCache:
+    cache = SchemaCache(portal_config.portal_id)
+    client = HubSpotClient(portal_config)
+    try:
+
+        async def _fetch(domain: str) -> tuple[str, dict[str, Any] | None]:
+            try:
+                resp = await client.get(
+                    f"/crm/v3/properties/{domain}",
+                    portal_id=portal_config.portal_id,
+                )
+                return domain, resp.body
+            except Exception:
+                return domain, None
+
+        results = await asyncio.gather(*(_fetch(d) for d in WARM_DOMAINS))
+        for domain, data in results:
+            if data is not None:
+                cache.set(domain, data)
+    finally:
+        await client.close()
+    return cache
