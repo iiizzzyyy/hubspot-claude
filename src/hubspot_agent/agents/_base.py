@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hubspot_agent.config import PortalConfig
+from hubspot_agent.research import RESEARCH_PROMPT_BLOCK
 from hubspot_agent.tools import ToolDef, list_tools
 
 
@@ -47,6 +48,7 @@ def build_agent_prompt(
         f"- If a tool returns an error, surface it clearly with the tool name.\n"
         f"- For write operations, confirm the action before executing.\n"
         f"- If the request is ambiguous, ask for clarification.\n"
+        f"\n{RESEARCH_PROMPT_BLOCK}\n"
     )
 
     return AgentPrompt(

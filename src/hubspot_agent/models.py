@@ -48,6 +48,7 @@ class PreviewResult(BaseModel):
     risk_level: RiskLevel
     proposed_payload: dict[str, Any] = Field(default_factory=dict)
     original_values: dict[str, Any] = Field(default_factory=dict)
+    informing_sources: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class AgentResult(BaseModel):

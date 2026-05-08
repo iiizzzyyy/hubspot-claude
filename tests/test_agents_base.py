@@ -42,3 +42,14 @@ def test_build_agent_prompt_with_portal():
     )
     assert "Portal ID: 123" in prompt.system_prompt
     assert "Tier: Professional" in prompt.system_prompt
+
+
+def test_build_agent_prompt_contains_research_block():
+    tools = []
+    prompt = build_agent_prompt(
+        agent_name="Test Agent",
+        domain_description="Testing domain.",
+        available_tools=tools,
+    )
+    assert "site:developers.hubspot.com" in prompt.system_prompt
+    assert "informing_sources" in prompt.system_prompt

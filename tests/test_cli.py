@@ -1,4 +1,4 @@
-from hubspot_agent.cli import hubspot_command
+from hubspot_agent.cli import _handle_setup, hubspot_command
 
 
 def test_hubspot_command_empty():
@@ -13,6 +13,10 @@ def test_hubspot_command_no_portal(tmp_path):
 
 def test_hubspot_command_routing(tmp_path, monkeypatch):
     from pathlib import Path
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr("hubspot_agent.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("hubspot_agent.cli.CONFIG_DIR", tmp_path)
+
     portal_file = tmp_path / ".hubspot-portal"
     portal_file.write_text("123\n")
 
@@ -22,10 +26,15 @@ def test_hubspot_command_routing(tmp_path, monkeypatch):
     result = hubspot_command("find contacts", working_dir=str(tmp_path))
     assert "Portal: 123" in result
     assert "objects" in result
+    assert "Cannot dispatch" not in result
 
 
 def test_hubspot_command_ambiguous(tmp_path, monkeypatch):
     from pathlib import Path
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr("hubspot_agent.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("hubspot_agent.cli.CONFIG_DIR", tmp_path)
+
     portal_file = tmp_path / ".hubspot-portal"
     portal_file.write_text("123\n")
     monkeypatch.setenv("HUBSPOT_TOKEN_123", "test-token")
@@ -98,3 +107,103 @@ def test_hubspot_portal_switch_persists(tmp_path, monkeypatch):
     portal_file = tmp_path / ".hubspot-portal"
     assert portal_file.exists()
     assert portal_file.read_text().strip() == "789"
+
+
+# ---------------------------------------------------------------------------
+# Setup command tests
+# ---------------------------------------------------------------------------
+
+
+def test_hubspot_setup_token(tmp_path, monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr("hubspot_agent.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("hubspot_agent.cli.CONFIG_DIR", tmp_path)
+
+    monkeypatch.setattr("hubspot_agent.setup.probe_portal", lambda pc: None)
+    monkeypatch.setattr("hubspot_agent.setup.warm_standard_schemas", lambda pc: None)
+    monkeypatch.setattr("hubspot_agent.maintenance.run_maintenance", lambda pid: None)
+
+    result = hubspot_command("setup 123 token pat-na1-test", working_dir=str(tmp_path))
+    assert "Setup complete" in result
+
+    portal_file = tmp_path / ".hubspot-portal"
+    assert portal_file.exists()
+    assert portal_file.read_text().strip() == "123"
+
+
+def test_hubspot_setup_oauth_success(tmp_path, monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr("hubspot_agent.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("hubspot_agent.cli.CONFIG_DIR", tmp_path)
+
+    monkeypatch.setattr("hubspot_agent.setup.probe_portal", lambda pc: None)
+    monkeypatch.setattr("hubspot_agent.setup.warm_standard_schemas", lambda pc: None)
+    monkeypatch.setattr("hubspot_agent.maintenance.run_maintenance", lambda pid: None)
+
+    from hubspot_agent.config import save_portal_config, PortalConfig
+    save_portal_config(PortalConfig(portal_id="123", token="test-token"))
+
+    def mock_auth(portal_id):
+        return {"success": True, "message": "OAuth complete"}
+
+    monkeypatch.setattr("hubspot_agent.cli._authenticate_portal_oauth", mock_auth)
+
+    result = hubspot_command("setup 123 oauth", working_dir=str(tmp_path))
+    assert "OAuth complete" in result
+    assert "Setup complete" in result
+
+    portal_file = tmp_path / ".hubspot-portal"
+    assert portal_file.exists()
+    assert portal_file.read_text().strip() == "123"
+
+
+def test_hubspot_setup_oauth_failure(tmp_path, monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    def mock_auth(portal_id):
+        return {"success": False, "message": "Auth failed: no creds"}
+
+    monkeypatch.setattr("hubspot_agent.cli._authenticate_portal_oauth", mock_auth)
+
+    result = hubspot_command("setup 123 oauth", working_dir=str(tmp_path))
+    assert "Auth failed: no creds" in result
+    assert "Setup complete" not in result
+
+    portal_file = tmp_path / ".hubspot-portal"
+    assert portal_file.exists()
+    assert portal_file.read_text().strip() == "123"
+
+
+def test_hubspot_setup_invalid_portal_id(tmp_path, monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    result = hubspot_command("setup abc token pat-na1-test", working_dir=str(tmp_path))
+    assert "Invalid portal ID" in result
+
+
+def test_hubspot_setup_missing_token_arg(tmp_path, monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    result = hubspot_command("setup 123 token", working_dir=str(tmp_path))
+    assert "Usage" in result
+
+
+def test_hubspot_setup_run_setup_raises(tmp_path, monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr("hubspot_agent.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("hubspot_agent.cli.CONFIG_DIR", tmp_path)
+
+    def mock_run_setup(portal_id, method=None, token=None):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("hubspot_agent.setup.run_setup", mock_run_setup)
+
+    result = hubspot_command("setup 456", working_dir=str(tmp_path))
+    assert "Setup failed" in result
+    assert "boom" in result

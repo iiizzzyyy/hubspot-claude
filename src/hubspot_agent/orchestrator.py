@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -16,9 +17,34 @@ from hubspot_agent.agents.properties import get_properties_agent_prompt
 from hubspot_agent.agents.raw_api import get_raw_api_agent_prompt
 from hubspot_agent.agents.users import get_users_agent_prompt
 from hubspot_agent.agents.workflows import get_workflows_agent_prompt
+from hubspot_agent.capabilities import (
+    CapabilityMatrix,
+    capability_explanation,
+    probe_portal,
+    validate_capabilities,
+)
 from hubspot_agent.config import PortalConfig
 from hubspot_agent.models import AgentResult, PreviewResult, RiskLevel
+from hubspot_agent.research import classify_url
+from hubspot_agent.cache import warm_standard_schemas
+from hubspot_agent.config import load_portal_config
+from hubspot_agent.maintenance import run_maintenance
 from hubspot_agent.snapshot import save_undo_snapshot
+from hubspot_agent.ledger import ActionLedger
+
+
+async def initialize_session(portal_id: str) -> None:
+    try:
+        await asyncio.wait_for(run_maintenance(portal_id), timeout=10.0)
+    except asyncio.TimeoutError:
+        pass
+    portal_config = load_portal_config(portal_id)
+    if portal_config is not None:
+        try:
+            await asyncio.wait_for(warm_standard_schemas(portal_config), timeout=15.0)
+        except asyncio.TimeoutError:
+            pass
+
 
 # ---------------------------------------------------------------------------
 # Routing
@@ -134,12 +160,90 @@ def validate_scopes(
 
 
 # ---------------------------------------------------------------------------
+# Capability validation
+# ---------------------------------------------------------------------------
+
+
+async def check_dispatch_readiness(
+    agent_names: list[str],
+    portal_config: PortalConfig,
+) -> dict[str, Any]:
+    """Validate scopes and capabilities before dispatching agents.
+
+    Returns a dict with:
+      - 'missing_scopes': dict[str, list[str]] — per-agent missing scopes
+      - 'missing_capabilities': dict[str, list[str]] — per-agent missing features
+      - 'ready': bool — True if nothing blocks dispatch
+      - 'decline_reason': str | None — human-readable explanation if not ready
+    """
+    scope_result = validate_scopes(agent_names, portal_config.scopes_granted or [])
+    matrix = await probe_portal(portal_config)
+    capability_result = validate_capabilities(agent_names, matrix)
+
+    ready = not scope_result and not capability_result
+    decline_reason: str | None = None
+    if not ready:
+        parts: list[str] = []
+        if capability_result:
+            for agent, features in capability_result.items():
+                for feature in features:
+                    parts.append(capability_explanation(feature))
+        if scope_result:
+            for agent, scopes in scope_result.items():
+                parts.append(f"{agent} requires scopes: {', '.join(scopes)}")
+        decline_reason = "Cannot dispatch: " + "; ".join(parts)
+
+    return {
+        "missing_scopes": scope_result,
+        "missing_capabilities": capability_result,
+        "ready": ready,
+        "decline_reason": decline_reason,
+    }
+
+
+# ---------------------------------------------------------------------------
 # HITL approval
 # ---------------------------------------------------------------------------
 
 
 def needs_approval(risk_level: RiskLevel) -> bool:
     return risk_level != RiskLevel.LOW
+
+
+def normalize_informing_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Validate and normalize informing_sources using URL classification.
+
+    Overrides any entry whose self-reported (source, trust_tier) disagrees
+    with the URL-derived classification, except it never upgrades a
+    self-reported 'community-accepted' to 'official' based on URL alone.
+    """
+    normalized: list[dict[str, Any]] = []
+    for entry in sources:
+        url = entry.get("url", "")
+        url_source, url_tier = classify_url(url)
+        reported_source = entry.get("source", "")
+        reported_tier = entry.get("trust_tier", "")
+        # If URL says official, force source/tier to official
+        if url_source == "official":
+            entry["source"] = "official"
+            entry["trust_tier"] = "official"
+        else:
+            # URL says community.  Preserve richer sub-agent context unless
+            # the agent claimed something impossible (e.g. official on a
+            # non-official domain).
+            if reported_source == "official":
+                entry["source"] = url_source
+                # Downgrade tier but keep accepted-answer context if present
+                if reported_tier == "community-accepted":
+                    entry["trust_tier"] = "community-accepted"
+                else:
+                    entry["trust_tier"] = url_tier
+            # If agent said community and URL says community, trust the agent
+            # unless it claimed a tier we can't justify from the URL.
+            if reported_source == "community" and reported_tier == "official":
+                entry["trust_tier"] = url_tier
+        normalized.append(entry)
+    return normalized
 
 
 def present_preview(result: PreviewResult, mode: str = "summary") -> str:
@@ -157,6 +261,18 @@ def present_preview(result: PreviewResult, mode: str = "summary") -> str:
         lines.append("- **Preview:**")
         for key, value in result.preview.items():
             lines.append(f"  - {key}: {value}")
+    if result.informing_sources:
+        lines.append("\n**Informed by:**")
+        for src in normalize_informing_sources(result.informing_sources):
+            tier_label = src.get("trust_tier", "")
+            title = src.get("title", "Untitled")
+            url = src.get("url", "")
+            if tier_label == "official":
+                lines.append(f"- [Official: {title}]({url})")
+            else:
+                display_tier = tier_label.replace("-", " ")
+                lines.append(f"- [{display_tier.title()}: {title}]({url})")
+
     if result.risk_level == RiskLevel.DESTRUCTIVE:
         lines.append(f"\n**Destructive action.** Type `{result.impact_count}` to confirm, or `details` for full record list.")
     else:
@@ -193,6 +309,25 @@ def dispatch_agent(
             error_message=f"Unknown agent: {agent_name}",
         )
 
+    action_id = str(uuid.uuid4())[:8]
+
+    # Idempotency check for writes
+    if mode == "execute" and payload is not None and portal_config is not None:
+        ledger = ActionLedger(portal_config.portal_id)
+        action_label = user_request.strip().splitlines()[0][:120]
+        duplicate = ledger.find_similar_in_flight(agent_name, action_label, payload)
+        if duplicate is not None:
+            return AgentResult(
+                agent_name=agent_name,
+                status="duplicate",
+                error_message=(
+                    f"Similar action already in flight (started at {duplicate.get('timestamp')}). "
+                    f"Wait for it to complete or cancel before retrying."
+                ),
+                data={"duplicate_action_id": duplicate.get("action_id")},
+            )
+        ledger.start_action(action_id, agent_name, action_label, payload)
+
     prompt = getter(portal_config)
     full_prompt_parts = [prompt.system_prompt, f"\nUser request: {user_request}", f"\nMode: {mode}"]
 
@@ -201,11 +336,24 @@ def dispatch_agent(
 
     full_prompt = "\n".join(full_prompt_parts)
 
+    data: dict[str, Any] = {
+        "system_prompt": prompt.system_prompt,
+        "full_prompt": full_prompt,
+        "tool_names": prompt.tool_names,
+    }
+    if mode == "execute" and payload is not None:
+        data["action_id"] = action_id
+
     return AgentResult(
         agent_name=agent_name,
         status="preview" if mode == "preview" else "ready",
-        data={"system_prompt": prompt.system_prompt, "full_prompt": full_prompt, "tool_names": prompt.tool_names},
+        data=data,
     )
+
+
+def record_action_completion(portal_id: str, action_id: str, result: dict[str, Any]) -> None:
+    ledger = ActionLedger(portal_id)
+    ledger.complete_action(action_id, result)
 
 
 # ---------------------------------------------------------------------------

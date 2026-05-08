@@ -15,8 +15,23 @@ from hubspot_agent.config import (
     load_portal_config,
     save_portal_config,
 )
+from hubspot_agent.maintenance import _validate_portal_id
 from hubspot_agent.models import AgentResult
-from hubspot_agent.orchestrator import dispatch_agent, route_request
+from hubspot_agent.setup import REQUIRED_SCOPES
+import asyncio
+
+from hubspot_agent.orchestrator import check_dispatch_readiness, dispatch_agent, initialize_session, route_request
+
+
+def _run_async(async_fn, *args, **kwargs):
+    """Run an async function from sync code, handling nested event loops."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(async_fn(*args, **kwargs))
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        return pool.submit(lambda: asyncio.run(async_fn(*args, **kwargs))).result()
 
 
 def _header(portal_id: str, tier: str = "unknown") -> str:
@@ -34,6 +49,9 @@ def hubspot_command(request: str, working_dir: str = ".") -> str:
     if request.lower() == "refresh":
         return _handle_refresh(working_dir)
 
+    if request.lower().startswith("setup"):
+        return _handle_setup(request[5:].strip(), working_dir)
+
     portal_id = detect_default_portal(working_dir)
     if not portal_id:
         return (
@@ -49,6 +67,8 @@ def hubspot_command(request: str, working_dir: str = ".") -> str:
             f"`/hubspot portal token {portal_id}` for a Private App token."
         )
 
+    _run_async(initialize_session, portal_id)
+
     agent_names = route_request(request)
     if not agent_names:
         return (
@@ -56,6 +76,10 @@ def hubspot_command(request: str, working_dir: str = ".") -> str:
             "I'm not sure which HubSpot domain this request belongs to. "
             "Could you rephrase or specify what you'd like to do (e.g., 'find contacts', 'create workflow')?"
         )
+
+    readiness = _run_async(check_dispatch_readiness, agent_names, portal_config)
+    if not readiness["ready"]:
+        return f"{_header(portal_id, portal_config.tier)}\n\n❌ {readiness['decline_reason']}"
 
     lines = [f"{_header(portal_id, portal_config.tier)}", f"**Routing to:** {', '.join(agent_names)}", ""]
 
@@ -68,6 +92,110 @@ def hubspot_command(request: str, working_dir: str = ".") -> str:
             lines.append(result.data.get("full_prompt", "").split("User request:")[1].split("\n")[0] if "User request:" in result.data.get("full_prompt", "") else "")
 
     return "\n".join(lines)
+
+
+def _authenticate_portal_oauth(portal_id: str) -> dict[str, Any]:
+    """Run OAuth authorization and return a structured result."""
+    creds = load_app_credentials()
+    if not creds:
+        return {
+            "success": False,
+            "message": (
+                "🔑 HubSpot app credentials needed.\n\n"
+                "Save them with:\n"
+                "```python\n"
+                "from hubspot_agent.app_credentials import save_app_credentials\n"
+                "save_app_credentials(client_id='your-client-id', client_secret='your-client-secret', app_id='your-app-id')\n"
+                "```\n\n"
+                f"Then run: `/hubspot portal auth {portal_id}`"
+            ),
+        }
+
+    try:
+        url = get_authorization_url(portal_id, list(REQUIRED_SCOPES))
+    except ValueError as exc:
+        return {"success": False, "message": f"❌ {exc}"}
+
+    lines = [
+        f"🔐 OAuth Authorization for Portal {portal_id}",
+        "",
+        f"**Authorization URL:** {url}",
+        "",
+        "A browser window should open automatically. If not, copy the URL above.",
+        "Waiting for callback on http://localhost:3000/oauth/callback ...",
+    ]
+
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+
+    try:
+        code = run_callback_server(port=3000, timeout=300.0)
+    except TimeoutError:
+        return {"success": False, "message": "⏱️ Authorization timed out. Please try again."}
+    except RuntimeError as exc:
+        return {"success": False, "message": f"❌ {exc}"}
+
+    try:
+        _run_async(exchange_code_for_token, portal_id, code)
+    except Exception as exc:
+        return {"success": False, "message": f"❌ Token exchange failed: {exc}"}
+
+    return {
+        "success": True,
+        "message": (
+            f"✅ OAuth authorization complete for portal {portal_id}.\n"
+            f"Access token saved. You can now run `/hubspot <request>`."
+        ),
+    }
+
+
+def _handle_portal_auth(portal_id: str) -> str:
+    return _authenticate_portal_oauth(portal_id)["message"]
+
+
+def _handle_setup(args: str, working_dir: str) -> str:
+    from hubspot_agent.setup import run_setup
+
+    parts = args.split(maxsplit=2)
+    if not parts:
+        return "Usage: /hubspot setup <portal_id> [oauth | token <pat>]"
+
+    portal_id = parts[0]
+    try:
+        _validate_portal_id(portal_id)
+    except ValueError:
+        return f"❌ Invalid portal ID: {portal_id}"
+
+    method = parts[1].lower() if len(parts) > 1 else None
+    token = parts[2] if len(parts) > 2 else None
+
+    portal_file = Path(working_dir) / ".hubspot-portal"
+    portal_file.write_text(f"{portal_id}\n")
+
+    if method == "oauth":
+        auth_result = _authenticate_portal_oauth(portal_id)
+        if not auth_result["success"]:
+            return auth_result["message"]
+        try:
+            result = _run_async(run_setup, portal_id)
+        except Exception as exc:
+            return f"❌ Setup failed: {exc}"
+        return f"{auth_result['message']}\n\n{result['message']}"
+
+    if method == "token" or method == "private_app":
+        if not token:
+            return f"Usage: /hubspot setup {portal_id} token <private-app-token>"
+        save_portal_config(
+            PortalConfig(portal_id=portal_id, token=token, auth_type="private_app")
+        )
+
+    try:
+        result = _run_async(run_setup, portal_id)
+    except Exception as exc:
+        return f"❌ Setup failed: {exc}"
+    return result["message"]
 
 
 def _handle_portal_command(subcommand: str, working_dir: str) -> str:
@@ -96,78 +224,6 @@ def _handle_portal_command(subcommand: str, working_dir: str) -> str:
         return _handle_portal_list()
 
     return f"Unknown portal command: {action}"
-
-
-def _handle_portal_auth(portal_id: str) -> str:
-    creds = load_app_credentials()
-    if not creds:
-        return (
-            "🔑 HubSpot app credentials needed.\n\n"
-            "Save them with:\n"
-            "```python\n"
-            "from hubspot_agent.app_credentials import save_app_credentials\n"
-            f"save_app_credentials(client_id='your-client-id', client_secret='your-client-secret', app_id='your-app-id')\n"
-            "```\n\n"
-            "Then run: `/hubspot portal auth {portal_id}`"
-        )
-
-    scopes = [
-        "crm.objects.contacts.read",
-        "crm.objects.contacts.write",
-        "crm.objects.companies.read",
-        "crm.objects.companies.write",
-        "crm.objects.deals.read",
-        "crm.objects.deals.write",
-        "crm.schemas.contacts.read",
-        "crm.schemas.contacts.write",
-        "automation.workflows.read",
-        "automation.workflows.write",
-        "crm.lists.read",
-        "crm.lists.write",
-        "crm.pipelines.read",
-        "crm.pipelines.write",
-        "settings.users.read",
-        "settings.users.write",
-        "crm.objects.engagements.read",
-        "crm.objects.engagements.write",
-    ]
-
-    try:
-        url = get_authorization_url(portal_id, scopes)
-    except ValueError as exc:
-        return f"❌ {exc}"
-
-    lines = [
-        f"🔐 OAuth Authorization for Portal {portal_id}",
-        "",
-        f"**Authorization URL:** {url}",
-        "",
-        "A browser window should open automatically. If not, copy the URL above.",
-        "Waiting for callback on http://localhost:3000/oauth/callback ...",
-    ]
-
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
-
-    try:
-        code = run_callback_server(port=3000, timeout=300.0)
-    except TimeoutError:
-        return "⏱️ Authorization timed out. Please try again."
-    except RuntimeError as exc:
-        return f"❌ {exc}"
-
-    import asyncio
-    try:
-        asyncio.run(exchange_code_for_token(portal_id, code))
-    except Exception as exc:
-        return f"❌ Token exchange failed: {exc}"
-
-    return (
-        f"✅ OAuth authorization complete for portal {portal_id}.\n"
-        f"Access token saved. You can now run `/hubspot <request>`."
-    )
 
 
 def _handle_portal_token(portal_id: str) -> str:
