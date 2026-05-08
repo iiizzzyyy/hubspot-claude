@@ -12,6 +12,45 @@ from hubspot_agent.config import PortalConfig
 WARM_DOMAINS = ["contacts", "companies", "deals", "tickets"]
 
 
+async def discover_custom_schemas(portal_config: PortalConfig) -> list[str]:
+    """Fetch custom object schemas from HubSpot and cache them.
+
+    Returns a list of custom object type names.  If the portal has no
+    custom objects, returns an empty list.
+    """
+    client = HubSpotClient(portal_config)
+    try:
+        resp = await client.get(
+            "/crm/v3/schemas",
+            portal_id=portal_config.portal_id,
+            expected_scopes=["crm.schemas.read"],
+        )
+        schemas = resp.body.get("results", [])
+        cache = SchemaCache(portal_config.portal_id)
+        names: list[str] = []
+        for schema in schemas:
+            if not isinstance(schema, dict):
+                continue
+            name = schema.get("name")
+            if not name or name in WARM_DOMAINS:
+                continue
+            names.append(name)
+            properties = schema.get("properties", [])
+            formatted = {
+                "results": [
+                    {"name": p.get("name"), "type": p.get("type")}
+                    for p in properties
+                    if isinstance(p, dict) and p.get("name")
+                ]
+            }
+            cache.set(name, formatted)
+        return names
+    except Exception:
+        return []
+    finally:
+        await client.close()
+
+
 class SchemaCache:
     TTL_SECONDS = 3600  # 1 hour
 
@@ -60,6 +99,19 @@ class SchemaCache:
 
     def refresh_domain(self, domain: str) -> None:
         self.invalidate(domain)
+
+    def list_custom_object_names(self) -> list[str]:
+        """Return cached custom object type names (non-standard, non-expired)."""
+        standard = set(WARM_DOMAINS)
+        names: list[str] = []
+        for domain, entry in self._data.items():
+            if domain.startswith("_") or domain in standard:
+                continue
+            ts = entry.get("_timestamp", 0)
+            if time.time() - ts > self.TTL_SECONDS:
+                continue
+            names.append(domain)
+        return names
 
 
 async def warm_standard_schemas(portal_config: PortalConfig) -> SchemaCache:

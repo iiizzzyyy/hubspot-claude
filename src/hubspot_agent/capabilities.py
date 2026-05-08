@@ -23,6 +23,9 @@ class CapabilityMatrix(BaseModel):
     users: bool = False
     custom_objects: bool = False
     calculated_properties: bool = False
+    service_automation: bool = False
+    marketing: bool = False
+    cms: bool = False
 
 
 class CapabilityCache:
@@ -70,6 +73,9 @@ class CapabilityCache:
 _AGENT_CAPABILITY_REQUIREMENTS: dict[str, list[str]] = {
     "workflows": ["workflows"],
     "users": ["users"],
+    "service": ["service_automation"],
+    "marketing": ["marketing"],
+    "cms": ["cms"],
 }
 
 
@@ -118,6 +124,18 @@ async def probe_portal(portal_config: PortalConfig) -> CapabilityMatrix:
             matrix.calculated_properties = has_calc
         except Exception:
             matrix.calculated_properties = False
+
+        try:
+            await client.get("/marketing/v3/emails?limit=1", portal_id=portal_config.portal_id)
+            matrix.marketing = True
+        except Exception:
+            matrix.marketing = False
+
+        try:
+            await client.get("/cms/v3/pages/site-pages?limit=1", portal_id=portal_config.portal_id)
+            matrix.cms = True
+        except Exception:
+            matrix.cms = False
     finally:
         await client.close()
 
@@ -148,5 +166,8 @@ def capability_explanation(feature: str) -> str:
         "users": "User management requires a Professional or Enterprise HubSpot subscription.",
         "custom_objects": "Custom objects require an Enterprise HubSpot subscription.",
         "calculated_properties": "Calculated properties require an Enterprise HubSpot subscription.",
+        "service_automation": "Service automation requires a Professional or Enterprise HubSpot subscription.",
+        "marketing": "Marketing emails and campaigns require a Marketing Hub Professional or Enterprise subscription.",
+        "cms": "CMS content management requires a CMS Hub or Content Hub subscription.",
     }
     return explanations.get(feature, f"{feature} is not available on this portal.")

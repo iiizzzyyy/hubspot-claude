@@ -53,19 +53,29 @@ def _type_compatible(value: Any, prop_type: str | None) -> bool:
     return True
 
 
+def validate_object_type(
+    object_type: str,
+    portal_id: str,
+    base_dir: Any = None,
+) -> bool:
+    """Return True if *object_type* is a known standard or cached custom type."""
+    if object_type in {"contacts", "companies", "deals", "tickets"}:
+        return True
+    cache = SchemaCache(portal_id, base_dir=base_dir)
+    return cache.get(object_type) is not None
+
+
 def validate_properties(
     object_type: str,
     properties: dict[str, Any],
     portal_id: str,
     base_dir: Any = None,
-    retry_with_refresh: bool = True,
 ) -> dict[str, Any]:
     """Validate property names and types against cached schema.
 
     Returns a dict with:
       - 'valid': bool
       - 'errors': list[dict] — each with 'property', 'reason', 'suggestions'
-      - 'refreshed': bool — whether cache was refreshed and re-checked
     """
     cache = SchemaCache(portal_id, base_dir=base_dir)
     schema_data = cache.get(object_type)
@@ -95,18 +105,6 @@ def validate_properties(
                 "reason": f"type_mismatch (expected {prop_type}, got {type(value).__name__})",
                 "suggestions": [],
             })
-
-    if errors and retry_with_refresh:
-        # Schema might be stale — invalidate and re-check once
-        cache.invalidate(object_type)
-        refreshed_schema = cache.get(object_type)
-        if refreshed_schema is not None:
-            # re-run without retry to avoid infinite loops
-            result = validate_properties(
-                object_type, properties, portal_id, base_dir=base_dir, retry_with_refresh=False
-            )
-            result["refreshed"] = True
-            return result
 
     return {
         "valid": len(errors) == 0,

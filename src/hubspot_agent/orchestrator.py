@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import logging
+import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from hubspot_agent.agents.analytics import get_analytics_agent_prompt
 from hubspot_agent.agents.associations import get_associations_agent_prompt
+from hubspot_agent.agents.cms import get_cms_agent_prompt
+from hubspot_agent.agents.custom_objects import get_custom_objects_agent_prompt
 from hubspot_agent.agents.engagements import get_engagements_agent_prompt
 from hubspot_agent.agents.hygiene import get_hygiene_agent_prompt
 from hubspot_agent.agents.lists import get_lists_agent_prompt
+from hubspot_agent.agents.marketing import get_marketing_agent_prompt
 from hubspot_agent.agents.objects import get_objects_agent_prompt
 from hubspot_agent.agents.pipelines import get_pipelines_agent_prompt
 from hubspot_agent.agents.properties import get_properties_agent_prompt
 from hubspot_agent.agents.raw_api import get_raw_api_agent_prompt
+from hubspot_agent.agents.service import get_service_agent_prompt
 from hubspot_agent.agents.users import get_users_agent_prompt
 from hubspot_agent.agents.workflows import get_workflows_agent_prompt
 from hubspot_agent.capabilities import (
@@ -26,12 +34,14 @@ from hubspot_agent.capabilities import (
 from hubspot_agent.config import PortalConfig
 from hubspot_agent.models import AgentResult, BatchApprovalMode, PreviewResult, RiskLevel
 from hubspot_agent.research import classify_url
-from hubspot_agent.cache import warm_standard_schemas
+from hubspot_agent.roles import RoleManager
+from hubspot_agent.cache import SchemaCache, warm_standard_schemas
 from hubspot_agent.config import load_portal_config
 from hubspot_agent.maintenance import run_maintenance
 from hubspot_agent.snapshot import save_undo_snapshot
 from hubspot_agent.ledger import ActionLedger
 from hubspot_agent.trace import emit_trace
+from hubspot_agent.plan import DAGPlan, DAGPlanner, PlanExecutor, PlanNode
 from hubspot_agent.preview import format_preview
 from hubspot_agent.reflection import reflect_on_write
 from hubspot_agent.routing import (
@@ -39,9 +49,49 @@ from hubspot_agent.routing import (
     build_routing_overrides_context,
     load_routing_overrides,
 )
+from hubspot_agent.memory import SessionMemory, SessionSummary, generate_summary
+from hubspot_agent.plugins import PluginLoader, augment_agent_prompt
+from hubspot_agent.hooks import (
+    HookEvent,
+    HookRegistry,
+    get_registry,
+    load_hooks_config,
+    register_hooks_from_config,
+    run_hooks,
+)
+from hubspot_agent.sandbox import (
+    SandboxResult,
+    SandboxRunner,
+    build_sandbox_offer_prompt,
+    format_sandbox_result,
+    get_sandbox_portal_config,
+    should_offer_sandbox,
+)
+
+logger = logging.getLogger(__name__)
+
+_session_context: SessionSummary | None = None
+_PLUGINS_INITIALIZED = False
+_PLUGIN_LOADER: PluginLoader | None = None
+_PLUGIN_LOCK = threading.Lock()
+
+
+def _ensure_plugins() -> list[Any]:
+    global _PLUGINS_INITIALIZED, _PLUGIN_LOADER
+    with _PLUGIN_LOCK:
+        if _PLUGINS_INITIALIZED:
+            return _PLUGIN_LOADER._plugins if _PLUGIN_LOADER else []
+        _PLUGIN_LOADER = PluginLoader()
+        plugin_dir = Path.home() / ".claude" / "hubspot" / "plugins"
+        _PLUGIN_LOADER.load_plugins(plugin_dir)
+        from hubspot_agent.tools import registry as tool_registry
+        _PLUGIN_LOADER.register_tools(tool_registry)
+        _PLUGINS_INITIALIZED = True
+        return _PLUGIN_LOADER._plugins
 
 
 async def initialize_session(portal_id: str) -> None:
+    global _session_context
     try:
         await asyncio.wait_for(run_maintenance(portal_id), timeout=10.0)
     except asyncio.TimeoutError:
@@ -52,6 +102,44 @@ async def initialize_session(portal_id: str) -> None:
             await asyncio.wait_for(warm_standard_schemas(portal_config), timeout=15.0)
         except asyncio.TimeoutError:
             pass
+    try:
+        register_hooks_from_config(portal_id)
+    except Exception:
+        pass
+    _session_context = SessionMemory.load_last_summary(portal_id)
+
+
+def get_session_context() -> SessionSummary | None:
+    return _session_context
+
+
+def end_session(
+    portal_id: str,
+    session_id: str,
+    started_at: datetime,
+    active_agents: list[str],
+    pending_approvals: int = 0,
+    custom_objects_discovered: list[str] | None = None,
+) -> None:
+    summary_text = generate_summary(
+        session_id=session_id,
+        portal_id=portal_id,
+        started_at=started_at,
+        active_agents=active_agents,
+        pending_approvals=pending_approvals,
+        custom_objects_discovered=custom_objects_discovered or [],
+    )
+    summary = SessionSummary(
+        session_id=session_id,
+        portal_id=portal_id,
+        started_at=started_at,
+        ended_at=datetime.now(timezone.utc),
+        summary=summary_text,
+        active_agents=active_agents,
+        pending_approvals=pending_approvals,
+        custom_objects_discovered=custom_objects_discovered or [],
+    )
+    SessionMemory.save_summary(portal_id, session_id, summary)
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +154,9 @@ _FAST_PATH_KEYWORDS: dict[str, list[str]] = {
     "workflows": ["workflow", "automation", "enroll", "trigger"],
     "lists": ["list", "segment", "add to list"],
     "engagements": ["note", "task", "meeting", "call", "activity", "log"],
+    "service": ["ticket", "knowledge base", "survey", "feedback"],
+    "marketing": ["campaign", "segment", "ab test", "suppression list"],
+    "cms": ["page", "blog", "file", "social"],
 }
 
 _STATIC_DEPENDENCIES: dict[str, list[str]] = {
@@ -86,6 +177,10 @@ _AGENT_GETTERS: dict[str, Any] = {
     "associations": get_associations_agent_prompt,
     "engagements": get_engagements_agent_prompt,
     "raw_api": get_raw_api_agent_prompt,
+    "service": get_service_agent_prompt,
+    "marketing": get_marketing_agent_prompt,
+    "cms": get_cms_agent_prompt,
+    "custom_objects": get_custom_objects_agent_prompt,
 }
 
 _AGENT_DESCRIPTIONS: dict[str, str] = {
@@ -107,13 +202,25 @@ def _order_with_dependencies(agent_names: list[str]) -> list[str]:
 
 
 def _fast_path_route(
-    request_text: str, overrides: dict[str, Any] | None = None
+    request_text: str,
+    overrides: dict[str, Any] | None = None,
+    portal_id: str | None = None,
 ) -> list[str] | None:
     """Keyword fast-path for top 5 common requests. Returns None if no clear match."""
     text = apply_routing_overrides(request_text.lower(), overrides or {})
     scored: dict[str, int] = {}
-    for agent, keywords in _FAST_PATH_KEYWORDS.items():
-        score = sum(1 for kw in keywords if kw in text)
+    keywords = dict(_FAST_PATH_KEYWORDS)
+    if portal_id:
+        try:
+            cache = SchemaCache(portal_id)
+            custom = cache.list_custom_object_names()
+            if custom:
+                keywords = dict(keywords)
+                keywords["objects"] = keywords.get("objects", []) + custom
+        except Exception:
+            pass
+    for agent, kws in keywords.items():
+        score = sum(1 for kw in kws if kw in text)
         if score > 0:
             scored[agent] = score
     # Apply agent overrides from routing configuration
@@ -183,7 +290,7 @@ def route_request(
     overrides = load_routing_overrides(portal_id) if portal_id else {}
     if llm_response is not None:
         return parse_llm_routing_response(llm_response)
-    fast_path = _fast_path_route(request_text, overrides)
+    fast_path = _fast_path_route(request_text, overrides, portal_id=portal_id)
     if fast_path is not None:
         return fast_path
     return []
@@ -194,9 +301,16 @@ def route_request(
 # ---------------------------------------------------------------------------
 
 
+_SCOPES_CACHE: dict[tuple[tuple[str, ...], tuple[str, ...]], dict[str, list[str]]] = {}
+
+
 def validate_scopes(
     agent_names: list[str], portal_scopes: list[str]
 ) -> dict[str, list[str]]:
+    cache_key = (tuple(sorted(agent_names)), tuple(sorted(portal_scopes)))
+    if cache_key in _SCOPES_CACHE:
+        return _SCOPES_CACHE[cache_key]
+
     missing: dict[str, list[str]] = {}
     portal_scope_set = set(portal_scopes)
 
@@ -210,8 +324,6 @@ def validate_scopes(
             from hubspot_agent.tools import get_tool
             tool_def = get_tool(tname)
             if tool_def and hasattr(tool_def.func, "__defaults__"):
-                # expected_scopes is typically the last kwarg default
-                import inspect
                 sig = inspect.signature(tool_def.func)
                 for param in sig.parameters.values():
                     if param.name == "expected_scopes" and param.default is not inspect.Parameter.empty:
@@ -219,7 +331,6 @@ def validate_scopes(
                             required.update(param.default)
             # fallback: look at closure cell defaults
             if tool_def and hasattr(tool_def.func, "__wrapped__"):
-                import inspect
                 sig = inspect.signature(tool_def.func)
                 for param in sig.parameters.values():
                     if param.name == "expected_scopes" and param.default is not inspect.Parameter.empty:
@@ -230,6 +341,7 @@ def validate_scopes(
         if missing_for_agent:
             missing[name] = missing_for_agent
 
+    _SCOPES_CACHE[cache_key] = missing
     return missing
 
 
@@ -401,6 +513,8 @@ def dispatch_agent(
     payload: dict[str, Any] | None = None,
     trace_id: str | None = None,
     batch_mode: BatchApprovalMode = BatchApprovalMode.SINGLE,
+    user_id: str | None = None,
+    risk_level: RiskLevel = RiskLevel.LOW,
 ) -> AgentResult:
     getter = _AGENT_GETTERS.get(agent_name)
     if getter is None:
@@ -417,13 +531,30 @@ def dispatch_agent(
             error_message=f"Unknown agent: {agent_name}",
         )
 
-    action_id = str(uuid.uuid4())[:8]
     portal_id = portal_config.portal_id if portal_config else None
+    if portal_id:
+        role_manager = RoleManager.for_portal(portal_id)
+        if not role_manager.can_dispatch(user_id, agent_name, risk_level):
+            reason = f"Role denied: user '{user_id}' cannot dispatch agent '{agent_name}' at risk '{risk_level.value}'"
+            if trace_id:
+                emit_trace(
+                    portal_id,
+                    "error",
+                    trace_id,
+                    {"agent": agent_name, "error": reason},
+                )
+            return AgentResult(
+                agent_name=agent_name,
+                status="error",
+                error_message=reason,
+            )
+
+    action_id = str(uuid.uuid4())[:8]
 
     # Idempotency check for writes
     if mode == "execute" and payload is not None and portal_config is not None:
         ledger = ActionLedger(portal_config.portal_id)
-        action_label = user_request.strip().splitlines()[0][:120]
+        action_label = (user_request.strip().splitlines()[0] if user_request.strip() else "unknown")[:120]
         duplicate = ledger.find_similar_in_flight(agent_name, action_label, payload)
         if duplicate is not None:
             if trace_id:
@@ -444,6 +575,29 @@ def dispatch_agent(
             )
         ledger.start_action(action_id, agent_name, action_label, payload)
 
+    # Anomaly detection
+    if portal_config is not None:
+        try:
+            from hubspot_agent.anomaly import AnomalyDetector
+            detector = AnomalyDetector()
+            check = detector.check_request(portal_config.portal_id, agent_name, agent_name)
+            if check.paused:
+                if trace_id:
+                    emit_trace(
+                        portal_config.portal_id,
+                        "error",
+                        trace_id,
+                        {"agent": agent_name, "error": f"Anomaly detected: {check.reason}", "deviation_sigma": check.deviation_sigma},
+                    )
+                return AgentResult(
+                    agent_name=agent_name,
+                    status="error",
+                    error_message=f"Anomaly detected: {check.reason} (deviation: {check.deviation_sigma:.1f} sigma)",
+                    data={"paused": True, "deviation_sigma": check.deviation_sigma, "reason": check.reason},
+                )
+        except Exception:
+            logger.exception("Anomaly detection failed for agent %s", agent_name)
+
     if trace_id and portal_id:
         emit_trace(
             portal_id,
@@ -453,6 +607,8 @@ def dispatch_agent(
         )
 
     prompt = getter(portal_config)
+    plugins = _ensure_plugins()
+    prompt.system_prompt = augment_agent_prompt(agent_name, prompt.system_prompt, plugins)
     full_prompt_parts = [
         prompt.system_prompt,
         f"\nUser request: {user_request}",
@@ -501,6 +657,9 @@ async def dispatch_agents_parallel(
     mode: str = "preview",
     trace_id: str | None = None,
     batch_mode: BatchApprovalMode = BatchApprovalMode.SINGLE,
+    user_id: str | None = None,
+    risk_level: RiskLevel = RiskLevel.LOW,
+    payload: dict[str, Any] | None = None,
 ) -> list[AgentResult]:
     """Dispatch multiple agents in parallel for read-only operations.
 
@@ -508,18 +667,47 @@ async def dispatch_agents_parallel(
     Execute-mode agents remain serial for HITL safety.
     """
     if mode == "execute":
-        # Serial dispatch for write operations
-        return [
-            dispatch_agent(
+        results: list[AgentResult] = []
+        for name in agent_names:
+            hook_result = await run_pre_write_hooks(
+                portal_id=portal_config.portal_id if portal_config else None,
+                agent_name=name,
+                payload=payload,
+            )
+            if not hook_result.allowed:
+                results.append(
+                    AgentResult(
+                        agent_name=name,
+                        status="blocked",
+                        error_message=hook_result.message or "Blocked by pre_write hook",
+                    )
+                )
+                if trace_id and portal_config:
+                    emit_trace(
+                        portal_config.portal_id,
+                        "error",
+                        trace_id,
+                        {
+                            "agent": name,
+                            "error": "Blocked by pre_write hook",
+                            "message": hook_result.message,
+                        },
+                    )
+                continue
+            modified_payload = hook_result.modified_payload or payload
+            result = dispatch_agent(
                 name,
                 user_request,
                 portal_config=portal_config,
                 mode=mode,
+                payload=modified_payload,
                 trace_id=trace_id,
                 batch_mode=batch_mode,
+                user_id=user_id,
+                risk_level=risk_level,
             )
-            for name in agent_names
-        ]
+            results.append(result)
+        return results
 
     coros = [
         asyncio.to_thread(
@@ -530,6 +718,8 @@ async def dispatch_agents_parallel(
             mode=mode,
             trace_id=trace_id,
             batch_mode=batch_mode,
+            user_id=user_id,
+            risk_level=risk_level,
         )
         for name in agent_names
     ]
@@ -576,6 +766,8 @@ def dispatch_correction(
         )
 
     prompt = getter(portal_config)
+    plugins = _ensure_plugins()
+    prompt.system_prompt = augment_agent_prompt(agent_name, prompt.system_prompt, plugins)
     original_error = original_result.error_message or "Unknown error"
     full_prompt_parts = [
         prompt.system_prompt,
@@ -605,9 +797,105 @@ def dispatch_correction(
     )
 
 
+async def run_pre_approval_hooks(
+    preview_result: PreviewResult,
+    portal_id: str | None = None,
+    agent_name: str | None = None,
+    action_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+    user_id: str | None = None,
+    registry: HookRegistry | None = None,
+) -> HookResult:
+    return await run_hooks(
+        HookEvent.PRE_APPROVAL,
+        portal_id=portal_id,
+        agent_name=agent_name,
+        action_id=action_id,
+        payload=payload,
+        preview_result=preview_result.model_dump() if preview_result else None,
+        user_id=user_id,
+        registry=registry,
+    )
+
+
+async def run_post_approval_hooks(
+    portal_id: str | None = None,
+    agent_name: str | None = None,
+    action_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+    user_id: str | None = None,
+    registry: HookRegistry | None = None,
+) -> HookResult:
+    return await run_hooks(
+        HookEvent.POST_APPROVAL,
+        portal_id=portal_id,
+        agent_name=agent_name,
+        action_id=action_id,
+        payload=payload,
+        user_id=user_id,
+        registry=registry,
+    )
+
+
+async def run_pre_write_hooks(
+    portal_id: str | None = None,
+    agent_name: str | None = None,
+    action_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+    user_id: str | None = None,
+    registry: HookRegistry | None = None,
+) -> HookResult:
+    return await run_hooks(
+        HookEvent.PRE_WRITE,
+        portal_id=portal_id,
+        agent_name=agent_name,
+        action_id=action_id,
+        payload=payload,
+        user_id=user_id,
+        registry=registry,
+    )
+
+
+async def run_post_write_hooks(
+    portal_id: str | None = None,
+    agent_name: str | None = None,
+    action_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+    user_id: str | None = None,
+    registry: HookRegistry | None = None,
+) -> HookResult:
+    return await run_hooks(
+        HookEvent.POST_WRITE,
+        portal_id=portal_id,
+        agent_name=agent_name,
+        action_id=action_id,
+        payload=payload,
+        user_id=user_id,
+        registry=registry,
+    )
+
+
 def record_action_completion(portal_id: str, action_id: str, result: dict[str, Any]) -> None:
     ledger = ActionLedger(portal_id)
     ledger.complete_action(action_id, result)
+
+
+async def record_action_completion_with_hooks(
+    portal_id: str,
+    action_id: str,
+    result: dict[str, Any],
+    agent_name: str | None = None,
+    payload: dict[str, Any] | None = None,
+    registry: HookRegistry | None = None,
+) -> None:
+    record_action_completion(portal_id, action_id, result)
+    await run_post_write_hooks(
+        portal_id=portal_id,
+        agent_name=agent_name,
+        action_id=action_id,
+        payload=payload,
+        registry=registry,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -657,3 +945,73 @@ def reconcile_after_timeout(
             f"Compare expected payload against actual HubSpot state and report discrepancies."
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Multi-step DAG planning
+# ---------------------------------------------------------------------------
+
+
+_DAG_PLANNER_SINGLETON = DAGPlanner(
+    fast_path_keywords=_FAST_PATH_KEYWORDS,
+    static_dependencies=_STATIC_DEPENDENCIES,
+    agent_getters=_AGENT_GETTERS,
+)
+
+
+def is_compound_request(request_text: str) -> bool:
+    return _DAG_PLANNER_SINGLETON._is_compound_request(request_text)
+
+
+async def route_and_plan(
+    request_text: str,
+    portal_config: PortalConfig,
+    trace_id: str | None = None,
+) -> DAGPlan | list[str]:
+    if not _DAG_PLANNER_SINGLETON._is_compound_request(request_text):
+        agents = route_request(request_text)
+        return agents
+
+    if trace_id:
+        emit_trace(
+            portal_config.portal_id,
+            "route_decision",
+            trace_id,
+            {"compound": True, "request_text": request_text},
+        )
+
+    plan = _DAG_PLANNER_SINGLETON.generate(request_text, portal_config)
+    return plan
+
+
+async def execute_plan(
+    plan: DAGPlan,
+    portal_config: PortalConfig,
+    trace_id: str | None = None,
+    sandbox_portal_config: PortalConfig | None = None,
+) -> list[AgentResult]:
+    effective_trace_id = trace_id or new_trace_id()
+
+    if sandbox_portal_config and plan.overall_risk in (
+        RiskLevel.HIGH,
+        RiskLevel.DESTRUCTIVE,
+    ):
+        runner = SandboxRunner(dispatch_agent_fn=dispatch_agent)
+        sandbox_result = await runner.preview_in_sandbox(plan, sandbox_portal_config)
+        emit_trace(
+            portal_config.portal_id,
+            "tool_call",
+            effective_trace_id,
+            {
+                "plan_id": plan.plan_id,
+                "event": "sandbox_preview_complete",
+                "sandbox_portal_id": sandbox_result.sandbox_portal_id,
+                "plan_executed": sandbox_result.plan_executed,
+                "warnings_count": len(sandbox_result.warnings),
+                "diff_matches": len(sandbox_result.behavior_diff.matches),
+                "diff_mismatches": len(sandbox_result.behavior_diff.mismatches),
+            },
+        )
+
+    executor = PlanExecutor(dispatch_agent_fn=dispatch_agent)
+    return await executor.execute(plan, portal_config, effective_trace_id)

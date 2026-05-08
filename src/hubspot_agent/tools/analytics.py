@@ -7,8 +7,8 @@ from hubspot_agent.errors import HubSpotError, RateLimitError, ScopeError
 from hubspot_agent.tools import tool
 
 
-@tool(name="hubspot_get_report", description="Fetch raw report data from HubSpot analytics.")
-async def hubspot_get_report(
+@tool(name="hubspot_get_analytics_report", description="Fetch raw report data from HubSpot analytics.")
+async def hubspot_get_analytics_report(
     report_id: str,
     client: HubSpotClient,
     portal_id: str,
@@ -21,7 +21,7 @@ async def hubspot_get_report(
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
-        return {"error": str(exc), "tool": "hubspot_get_report"}
+        return {"error": str(exc), "tool": "hubspot_get_analytics_report"}
 
 
 @tool(name="hubspot_calculate_metrics", description="Calculate conversion rate, average deal size, and win rate from deal data.")
