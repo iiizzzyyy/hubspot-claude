@@ -1,19 +1,48 @@
-# HubSpot Agent
+# HubSpot Plugin
 
 A Claude Code plugin (`/hubspot`) for natural-language administration of HubSpot CRM. Claude orchestrates specialist sub-agents that each call the `hubspot` CLI over Bash to perform CRUD across contacts, companies, deals, workflows, lists, pipelines, properties, analytics, engagements, associations, and more — with mandatory human-in-the-loop approval for every write.
 
+This is a **local-execution** plugin: a `SessionStart` hook provisions an isolated Python venv on your machine and the CLI runs against your local filesystem (portal tokens, `.hubspot-portal`, undo snapshots, audit log). It is designed for Claude Code (CLI, desktop, IDE) — see [Notes & Limitations](#notes--limitations) for why it is not a fit for Claude Cowork.
+
+> **Important**: Every write is gated behind a preview + explicit `approve`. Destructive operations require the expected record count, re-checked at execute time. The plugin authenticates with OAuth 2.0 or Private App tokens only — never API keys. HubSpot credentials are stored locally under `~/.claude/hubspot/`; review your org's secret-handling policy before use.
+
 The agent and tool catalogs live in code. As of this release the registry holds **44 specialist sub-agents** and **75 tools**; discover the current set with `hubspot agents list` and `hubspot tools list` rather than trusting this number.
 
-## Install
+## Features
 
-### From the marketplace
+- **Natural-language CRM admin** — route a request to one or more specialist sub-agents, each scoped to a HubSpot domain (contacts, deals, workflows, lists, pipelines, properties, analytics, engagements, associations, audit, hygiene, …).
+- **Human-in-the-loop writes** — writes return a preview + `action_id`, never a mutation; nothing happens until you `approve` (with a mandatory count for destructive ops).
+- **Warm-client daemon** — reads and write-previews reuse one `HubSpotClient` + schema cache for speed; everything else runs in-process with identical results.
+- **Durable loops** — `/hubspot --loop '<goal>'` runs triage → sequential step execution → verify → checkpoint, resumable across sessions.
+- **Undo + audit** — every approved create/update/delete records an undo snapshot and an audit entry (FR-17/FR-18).
+- **Multi-portal** — isolated state per portal; auto-detection via a `.hubspot-portal` file in the working directory.
+
+## Prerequisites
+
+- **Claude Code** installed and logged in.
+- **Python ≥ 3.12** on `PATH` (`python3 --version`). The hook builds the venv from this interpreter; older versions fail to install the package.
+- `uv` is optional but recommended — the provisioning hook prefers it and falls back to `python3 -m venv` + `pip`.
+- A HubSpot portal with either a **Private App token** or an **OAuth 2.0** app.
+
+## Installation
+
+### From the marketplace (recommended)
+
+In Claude Code:
 
 ```
 /plugin marketplace add iiizzzyyy/hubspot-claude
 /plugin install hubspot@hubspot-claude
 ```
 
-On the first session after install, a `SessionStart` hook provisions an isolated venv under `${CLAUDE_PLUGIN_DATA}/venv` (preferring `uv`, else `python3 -m venv` + `pip install`) and writes `venv.path` so the `bin/hubspot` resolver can find it. The hook rebuilds the venv only when `pyproject.toml` changes, fails gracefully (never blocks the session), and does **not** start the daemon.
+Or via the CLI:
+
+```bash
+claude plugin marketplace add iiizzzyyy/hubspot-claude
+claude plugin install hubspot@hubspot-claude
+```
+
+On the first session after install, the `SessionStart` hook (`hooks/install.sh`) provisions an isolated venv under `${CLAUDE_PLUGIN_DATA}/venv` (preferring `uv`, else `python3 -m venv` + `pip install`), writes `venv.path` so the `bin/hubspot` resolver can find it, and records a hash of `pyproject.toml` so it only rebuilds when the manifest changes. The hook never blocks the session and does **not** start the daemon.
 
 ### Local development
 
@@ -25,29 +54,64 @@ claude plugin validate ./        # schema-check plugin.json + marketplace.json +
 claude --plugin-dir ./           # load the plugin for this session
 ```
 
-Then invoke `/hubspot` in that session. (If the plugin is also installed from the marketplace, uninstall it first so both copies don't collide.) Confirm the exact invocation name Claude Code registers — it is `/hubspot` for a root `SKILL.md` with `name: hubspot`; update these docs if your local run shows otherwise.
+Then invoke `/hubspot` in that session. If the plugin is also installed from the marketplace, uninstall it first so the two copies don't collide.
 
-## Authenticate
+## Commands
 
-**Private App token (simplest for personal use):**
+The plugin ships a single entrypoint at `${CLAUDE_PLUGIN_ROOT}/bin/hubspot` (a POSIX sh resolver that finds the plugin venv python and runs the daemon router). Sub-agents always pass `--portal` and `--working-dir` so they hit the same portal as the originating request.
 
+| Command | Purpose |
+|---------|---------|
+| `/hubspot <request>` | Natural-language request routed to specialist sub-agents |
+| `/hubspot --loop '<goal>'` | Durable closed loop (triage → execute → verify → checkpoint) |
+| `/hubspot --pattern '<sample>'` | Sample-verify-scale batch approval |
+| `hubspot status` | Portal, agent readiness, pending approvals |
+| `hubspot route '<request>'` | JSON `{agents, rationale}` showing which agents a request maps to |
+| `hubspot tool <name> --input '<json>'` | Read → JSON result; write → preview + `action_id` |
+| `hubspot agents list` / `tools list` | Enumerate the registry (single source of truth for counts) |
+| `hubspot agent-prompt <name>` | Full prompt for one specialist agent |
+| `hubspot approve <id> [<count>]` | Execute a previewed write (count required + re-checked for destructive) |
+| `hubspot reject <id>` | Discard a pending write |
+| `hubspot loop status\|log\|continue\|abandon` | Inspect or steer a running loop |
+| `hubspot serve` / `serve stop` | Warm-client daemon lifecycle |
+| `hubspot portal auth\|token\|list\|switch` | Portal + auth management |
+| `hubspot setup <id> oauth\|token <pat>` | Full portal setup |
+| `hubspot refresh` | Refresh the schema cache |
+
+`--portal` and `--working-dir` are top-level flags and must precede any JSON `--input` value.
+
+## Skills (specialist agents)
+
+The 44 specialist sub-agents live in `src/hubspot_agent/agents/` and are surfaced by the registry. Discover them at runtime rather than hardcoding:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/bin/hubspot" agents list        # 44 agents (from the registry)
+"${CLAUDE_PLUGIN_ROOT}/bin/hubspot" agent-prompt <name>  # full prompt for one agent
 ```
-/hubspot setup <portal_id> token <pat-na1-...>
-```
 
-**OAuth 2.0 (for team setups):**
+Categories include Core CRM (contacts, companies, deals, associations), Analytics & Data, Content & Projects, System & Audit, Hygiene, and more. If you need to state a count in prose, run `agents list` first and count the entries — the registry is the single source of truth.
 
-```
-/hubspot setup <portal_id> oauth
-```
+## Example workflows
 
-Auth is OAuth 2.0 or Private App tokens only — never API keys. Portal auto-detection reads a `.hubspot-portal` file in the working directory; multi-portal setups keep isolated state per portal.
+### Find and merge duplicate contacts
 
-**Verify:**
+1. `/hubspot find duplicate contacts and merge them`
+2. Claude routes to the `hygiene` agent, which calls `hubspot tool hubspot_find_duplicates --input '{...}'` (a read → JSON result).
+3. Claude presents a **preview + `action_id`** (the merge does not happen yet).
+4. `/hubspot approve <action_id> 3` — you confirm with the expected count (mandatory for destructive ops).
+5. `/hubspot tool hubspot_get_contact --input '{...}'` — verify the merge landed.
 
-```
-/hubspot status
-```
+### Create a deal
+
+1. `/hubspot create a deal for Acme Corp worth $50,000`
+2. Claude presents a preview + `action_id`.
+3. `/hubspot approve <action_id>` — executes; an undo snapshot + audit entry are written.
+
+### Reconcile stale deals in a loop
+
+1. `/hubspot --loop 'reconcile stale deals older than 90 days'`
+2. Inspect progress: `/hubspot loop status` and `/hubspot loop log`.
+3. Resume after an interruption: `/hubspot loop continue`. Stop early: `/hubspot loop abandon`.
 
 ## How it works
 
@@ -66,24 +130,41 @@ Claude orchestrates  ── route ──▶ {"agents": ["hygiene"], ...}
 
 - **Claude is the orchestrator** — it routes, spawns sub-agents with `hubspot agent-prompt <name>`, and approves writes. No custom orchestration framework; Claude Code's native `Agent` tool does the spawning.
 - **The CLI is the single source of truth** — every sub-agent calls `${CLAUDE_PLUGIN_ROOT}/bin/hubspot tool <name> --input '<json>' --portal <id> --working-dir <dir>`.
-- **Warm-client daemon** — read and write-preview tool calls route through one reused `HubSpotClient` + schema cache for speed; `approve`/`reject`/`loop *`/`route`/`agents` run in-process. The daemon is lazy-started on the first tool call, self-exits after idle, and `bin/hubspot` falls back to the in-process CLI if it's ever unreachable (same correct result, only slower). Manage it with `hubspot serve` / `hubspot serve stop`.
-- **Durable loops** — `/hubspot --loop '<goal>'` runs triage → sequential step execution → verify → checkpoint, with `loop status`/`log`/`continue`/`abandon`.
+- **Warm-client daemon** — read and write-preview tool calls route through one reused `HubSpotClient` + schema cache for speed; `approve`/`reject`/`loop *`/`route`/`agents` run in-process. The daemon is lazy-started on the first tool call, self-exits after idle, and `bin/hubspot` falls back to the in-process CLI if it's ever unreachable (same correct result, only slower).
+- **Three call paths, one handler set** — daemon (warm), in-process fallback (fresh client), and CLI sync all share `src/hubspot_agent/handlers.py`, so the approve→execute safety contract (destructive-count gate, undo snapshot, created-id capture, audit, clear-pending) is identical everywhere.
+- **Read-based previews** — HubSpot has no dry-run API, so writes preview the affected records and return an `action_id`; nothing mutates until `approve`.
 
-## Sub-commands
+## Configuration
 
-| Command | Purpose |
-|---------|---------|
-| `hubspot status` | Portal, agent readiness, pending approvals |
-| `hubspot route '<request>'` | JSON `{agents, rationale}` |
-| `hubspot tool <name> --input '<json>'` | Read → JSON; write → preview + `action_id` |
-| `hubspot agents list` / `tools list` | Enumerate the registry |
-| `hubspot agent-prompt <name>` | Full prompt for one agent |
-| `hubspot approve <id> [<count>]` | Execute a previewed write (count required for destructive) |
-| `hubspot reject <id>` | Discard a pending write |
-| `hubspot --loop '<goal>'` / `loop status\|log\|continue\|abandon` | Durable closed loop |
-| `hubspot --pattern '<sample>'` | Sample-verify-scale batch approval |
-| `hubspot serve` / `serve stop` | Warm-client daemon lifecycle |
-| `hubspot portal auth\|token\|list\|switch` / `setup` / `refresh` | Portal + auth management |
+### Authentication
+
+**Private App token (simplest for personal use):**
+
+```
+/hubspot setup <portal_id> token <pat-na1-...>
+```
+
+**OAuth 2.0 (for team setups):**
+
+```
+/hubspot setup <portal_id> oauth
+```
+
+Auth is OAuth 2.0 or Private App tokens only — never API keys. Portal auto-detection reads a `.hubspot-portal` file in the working directory; multi-portal setups keep isolated state per portal.
+
+**Verify everything is wired:**
+
+```
+/hubspot status
+```
+
+### Where state lives
+
+| Path | Contents |
+|------|----------|
+| `${CLAUDE_PLUGIN_DATA}/venv` | Provisioned plugin venv (written by the SessionStart hook) |
+| `${CLAUDE_PLUGIN_DATA}/install.log` | Venv provisioning log (check this if the CLI won't load) |
+| `~/.claude/hubspot/<portal>/` | Portal config, schema cache, undo snapshots, audit log, pending previews, loop state |
 
 ## Project structure
 
@@ -107,11 +188,14 @@ hooks/                    # SessionStart venv provisioning
 tests/                    # pytest suite
 ```
 
-## Testing
+## Development
 
 ```bash
-pytest -x                 # full suite
-pytest tests/test_install_hook.py -v   # SessionStart venv contract
+pip install -e ".[dev]"                      # test deps (pytest, pytest-asyncio, respx, hypothesis, pyyaml)
+pytest -x                                    # full suite (840 passed, 3 skipped)
+pytest tests/test_install_hook.py -v         # SessionStart venv contract
+bash scripts/check-artifact-allowlist.sh     # shipping-artifact allowlist gate
+claude plugin validate ./                    # schema-check manifests + hooks
 ```
 
 ## Key design decisions
@@ -121,6 +205,18 @@ pytest tests/test_install_hook.py -v   # SessionStart venv contract
 3. **Count-based confirmation** — destructive operations require the expected count, re-checked at execute time.
 4. **One warm client** — the daemon reuses a single `HubSpotClient` + schema cache; every other path runs in-process with identical results.
 5. **Three call paths, one handler set** — daemon (warm), in-process fallback (fresh client), and CLI sync all share `handlers.py`.
+
+## Notes & Limitations
+
+- **Not for Claude Cowork.** Cowork runs in a cloud Linux sandbox, not on your local machine, and currently ignores `SessionStart` hooks ([anthropics/claude-code#40495](https://github.com/anthropics/claude-code/issues/40495), [#47993](https://github.com/anthropics/claude-code/issues/47993)). The plugin's venv-provisioning hook, local-CLI exec, local token storage, and warm-client daemon all assume local execution. The `hubspot` skill would register in Cowork but no action would run. Bringing HubSpot into Cowork would mean repackaging it as an MCP connector — a separate project.
+- **Python ≥ 3.12 required.** The venv is built from the `python3` on `PATH`; older interpreters fail the `requires-python>=3.12` constraint and `bin/hubspot` falls back to a system python that can't import the package (exit 127).
+- **Venv provisioning is silent on failure.** The hook always `exit 0` so it never blocks the session — a failed provision looks fine until `/hubspot` returns a router import error. After a fresh install, check `${CLAUDE_PLUGIN_DATA}/install.log` and `venv.path`.
+- **Stale venv after editing `pyproject.toml`** — the hash-gate auto-rebuilds on the next session start. To force an immediate rebuild, delete `${CLAUDE_PLUGIN_DATA}/.pyproject.sha` (or `rm -rf "${CLAUDE_PLUGIN_DATA}/venv"`) and restart.
+- **Secrets are stored locally** — portal tokens live under `~/.claude/hubspot/`. Ensure that directory is appropriately protected and excluded from backups/sync as your policy requires.
+
+## Questions or Issues?
+
+Open an issue at [github.com/iiizzzyyy/hubspot-claude/issues](https://github.com/iiizzzyyy/hubspot-claude/issues).
 
 ## License
 
