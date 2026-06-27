@@ -10,32 +10,44 @@ from hubspot_agent.maintenance import run_maintenance
 
 
 REQUIRED_SCOPES = [
+    # Standard CRM objects + schemas
     "crm.objects.contacts.read",
     "crm.objects.contacts.write",
     "crm.objects.companies.read",
     "crm.objects.companies.write",
     "crm.objects.deals.read",
     "crm.objects.deals.write",
-    "crm.objects.tickets.read",
-    "crm.objects.tickets.write",
     "crm.schemas.contacts.read",
     "crm.schemas.contacts.write",
     "crm.schemas.companies.read",
     "crm.schemas.companies.write",
     "crm.schemas.deals.read",
     "crm.schemas.deals.write",
-    "crm.schemas.tickets.read",
-    "crm.schemas.tickets.write",
-    "automation.workflows.read",
-    "automation.workflows.write",
+    # Tickets use a single read/write scope; no tickets schema scope exists.
+    "tickets",
+    # Lists
     "crm.lists.read",
     "crm.lists.write",
-    "crm.pipelines.read",
-    "crm.pipelines.write",
+    # Workflows / automation (requires Pro/Enterprise portal)
+    "automation",
+    # Pipelines (orders); deal pipelines are also covered by crm.objects.deals.*
+    "crm.pipelines.orders.read",
+    "crm.pipelines.orders.write",
+    # Users
     "settings.users.read",
     "settings.users.write",
-    "crm.objects.engagements.read",
-    "crm.objects.engagements.write",
+    # Engagements — granular per-type scopes (notes/calls/meetings/tasks/emails)
+    "crm.objects.notes.read",
+    "crm.objects.notes.write",
+    "crm.objects.calls.read",
+    "crm.objects.calls.write",
+    "crm.objects.meetings.read",
+    "crm.objects.meetings.write",
+    "crm.objects.tasks.read",
+    "crm.objects.tasks.write",
+    "crm.objects.emails.read",
+    "crm.objects.emails.write",
+    "sales-email-read",
 ]
 
 

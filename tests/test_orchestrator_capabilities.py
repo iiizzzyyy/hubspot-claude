@@ -31,7 +31,7 @@ async def test_check_dispatch_readiness_all_clear(respx_mock, monkeypatch, tmp_p
     portal = PortalConfig(
         portal_id="123",
         token="test-token",
-        scopes_granted=["crm.objects.contacts.read", "automation.workflows.write"],
+        scopes_granted=["crm.objects.contacts.read", "automation"],
     )
     result = await check_dispatch_readiness(["workflows"], portal)
     assert result["ready"] is True
@@ -62,7 +62,7 @@ async def test_check_dispatch_readiness_missing_capability(respx_mock, monkeypat
     portal = PortalConfig(
         portal_id="123",
         token="test-token",
-        scopes_granted=["crm.objects.contacts.read", "automation.workflows.write"],
+        scopes_granted=["crm.objects.contacts.read", "automation"],
     )
     result = await check_dispatch_readiness(["workflows"], portal)
     assert result["ready"] is False
@@ -115,7 +115,7 @@ async def test_check_dispatch_readiness_uses_cached_matrix(monkeypatch, tmp_path
     portal = PortalConfig(
         portal_id="123",
         token="test-token",
-        scopes_granted=["automation.workflows.write"],
+        scopes_granted=["automation"],
     )
     result = await check_dispatch_readiness(["workflows"], portal)
     assert result["ready"] is False

@@ -31,7 +31,7 @@ def test_property_scopes_use_schema_family():
 
 def test_workflow_scopes():
     scopes = get_required_scopes(["hubspot_create_workflow"])
-    assert scopes == {"automation.workflows.write"}
+    assert scopes == {"automation"}
 
 
 def test_list_scopes():

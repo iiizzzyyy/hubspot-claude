@@ -146,26 +146,31 @@ async def test_setup_all_scopes_granted(respx_mock, tmp_path, monkeypatch):
                 "crm.objects.companies.write",
                 "crm.objects.deals.read",
                 "crm.objects.deals.write",
-                "crm.objects.tickets.read",
-                "crm.objects.tickets.write",
                 "crm.schemas.contacts.read",
                 "crm.schemas.contacts.write",
                 "crm.schemas.companies.read",
                 "crm.schemas.companies.write",
                 "crm.schemas.deals.read",
                 "crm.schemas.deals.write",
-                "crm.schemas.tickets.read",
-                "crm.schemas.tickets.write",
-                "automation.workflows.read",
-                "automation.workflows.write",
+                "tickets",
                 "crm.lists.read",
                 "crm.lists.write",
-                "crm.pipelines.read",
-                "crm.pipelines.write",
+                "automation",
+                "crm.pipelines.orders.read",
+                "crm.pipelines.orders.write",
                 "settings.users.read",
                 "settings.users.write",
-                "crm.objects.engagements.read",
-                "crm.objects.engagements.write",
+                "crm.objects.notes.read",
+                "crm.objects.notes.write",
+                "crm.objects.calls.read",
+                "crm.objects.calls.write",
+                "crm.objects.meetings.read",
+                "crm.objects.meetings.write",
+                "crm.objects.tasks.read",
+                "crm.objects.tasks.write",
+                "crm.objects.emails.read",
+                "crm.objects.emails.write",
+                "sales-email-read",
             ],
         )
     )
@@ -419,3 +424,46 @@ async def test_setup_schema_counts_malformed_cache(respx_mock, tmp_path, monkeyp
     assert result["schema_counts"] is not None
     assert "contacts" not in result["schema_counts"]
     assert result["schema_counts"].get("companies") == 1
+
+
+# Registry of HubSpot OAuth scopes that are officially selectable / documented.
+# Sourced from https://developers.hubspot.com/docs/apps/developer-platform/build-apps/authentication/scopes
+# Keep this in sync with that reference; the regression test below guards against
+# re-introducing invented scope strings (e.g. automation.workflows.*, crm.pipelines.*,
+# crm.objects.engagements.*, crm.objects.tickets.*) that HubSpot rejects at authorize time.
+_VALID_HUBSPOT_SCOPES = {
+    # CRM objects (granular)
+    "crm.objects.contacts.read", "crm.objects.contacts.write",
+    "crm.objects.companies.read", "crm.objects.companies.write",
+    "crm.objects.deals.read", "crm.objects.deals.write",
+    "crm.objects.notes.read", "crm.objects.notes.write",
+    "crm.objects.calls.read", "crm.objects.calls.write",
+    "crm.objects.meetings.read", "crm.objects.meetings.write",
+    "crm.objects.tasks.read", "crm.objects.tasks.write",
+    "crm.objects.emails.read", "crm.objects.emails.write",
+    "crm.objects.appointments.read", "crm.objects.appointments.write",
+    # CRM schemas
+    "crm.schemas.contacts.read", "crm.schemas.contacts.write",
+    "crm.schemas.companies.read", "crm.schemas.companies.write",
+    "crm.schemas.deals.read", "crm.schemas.deals.write",
+    # Tickets (single R/W scope)
+    "tickets",
+    # Lists
+    "crm.lists.read", "crm.lists.write",
+    # Automation (Pro/Enterprise)
+    "automation",
+    # Pipelines (orders only)
+    "crm.pipelines.orders.read", "crm.pipelines.orders.write",
+    # Users / settings
+    "settings.users.read", "settings.users.write",
+    # Email engagements (legacy, still required for /crm/v3/objects/emails)
+    "sales-email-read",
+    # Timeline events
+    "timeline",
+}
+
+
+def test_required_scopes_are_valid_hubspot_scopes():
+    """Every scope we request at OAuth authorize time must be a real HubSpot scope."""
+    invalid = [s for s in REQUIRED_SCOPES if s not in _VALID_HUBSPOT_SCOPES]
+    assert invalid == [], f"REQUIRED_SCOPES contains non-HubSpot scopes: {invalid}"

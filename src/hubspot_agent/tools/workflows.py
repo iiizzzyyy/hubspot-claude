@@ -43,7 +43,7 @@ async def hubspot_get_workflow(
         resp = await client.get(
             f"/automation/v4/flows/{quote(workflow_id, safe='')}",
             portal_id=portal_id,
-            expected_scopes=["automation.workflows.read"],
+            expected_scopes=["automation"],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
@@ -59,7 +59,7 @@ async def hubspot_list_workflows(
         resp = await client.get(
             "/automation/v4/flows",
             portal_id=portal_id,
-            expected_scopes=["automation.workflows.read"],
+            expected_scopes=["automation"],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
@@ -80,7 +80,7 @@ async def hubspot_create_workflow(
             "/automation/v4/flows",
             portal_id=portal_id,
             body={"name": name, "type": workflow_type, "actions": actions, "enrollment": enrollment},
-            expected_scopes=["automation.workflows.write"],
+            expected_scopes=["automation"],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
@@ -99,7 +99,7 @@ async def hubspot_update_workflow(
             f"/automation/v4/flows/{quote(workflow_id, safe='')}",
             portal_id=portal_id,
             body=updates,
-            expected_scopes=["automation.workflows.write"],
+            expected_scopes=["automation"],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
@@ -118,7 +118,7 @@ async def hubspot_enroll_workflow(
             f"/automation/v4/flows/{quote(workflow_id, safe='')}/enrollments",
             portal_id=portal_id,
             body={"objectIds": object_ids},
-            expected_scopes=["automation.workflows.write"],
+            expected_scopes=["automation"],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
@@ -137,7 +137,7 @@ async def hubspot_toggle_workflow(
             f"/automation/v4/flows/{quote(workflow_id, safe='')}/toggle",
             portal_id=portal_id,
             body={"enabled": enabled},
-            expected_scopes=["automation.workflows.write"],
+            expected_scopes=["automation"],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
@@ -188,7 +188,7 @@ async def hubspot_create_workflow_from_blueprint(
             "/automation/v4/flows",
             portal_id=portal_id,
             body=payload,
-            expected_scopes=["automation.workflows.write"],
+            expected_scopes=["automation"],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:

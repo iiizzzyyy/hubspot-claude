@@ -92,23 +92,25 @@ _TOOL_SCOPES: dict[str, set[str] | Any] = {
     "hubspot_add_to_list": {"crm.lists.write"},
     "hubspot_remove_from_list": {"crm.lists.write"},
 
-    # Workflows
-    "hubspot_list_workflows": {"automation.workflows.read"},
-    "hubspot_get_workflow": {"automation.workflows.read"},
-    "hubspot_create_workflow": {"automation.workflows.write"},
-    "hubspot_update_workflow": {"automation.workflows.write"},
-    "hubspot_toggle_workflow": {"automation.workflows.write"},
-    "hubspot_enroll_workflow": {"automation.workflows.write"},
-    "hubspot_create_workflow_from_blueprint": {"automation.workflows.write"},
+    # Workflows — HubSpot exposes a single `automation` read/write scope
+    # (Pro/Enterprise portals only).
+    "hubspot_list_workflows": {"automation"},
+    "hubspot_get_workflow": {"automation"},
+    "hubspot_create_workflow": {"automation"},
+    "hubspot_update_workflow": {"automation"},
+    "hubspot_toggle_workflow": {"automation"},
+    "hubspot_enroll_workflow": {"automation"},
+    "hubspot_create_workflow_from_blueprint": {"automation"},
 
-    # Pipelines
-    "hubspot_list_pipelines": {"crm.pipelines.read"},
-    "hubspot_get_pipeline": {"crm.pipelines.read"},
-    "hubspot_create_pipeline": {"crm.pipelines.write"},
-    "hubspot_update_pipeline": {"crm.pipelines.write"},
-    "hubspot_reorder_stages": {"crm.pipelines.write"},
-    "hubspot_create_ticket_pipeline": {"crm.pipelines.write"},
-    "hubspot_get_ticket_pipeline": {"crm.pipelines.read"},
+    # Pipelines — only `crm.pipelines.orders.*` exists; deal pipelines are
+    # gated by crm.objects.deals.* / crm.schemas.deals.* (already required).
+    "hubspot_list_pipelines": {"crm.pipelines.orders.read"},
+    "hubspot_get_pipeline": {"crm.pipelines.orders.read"},
+    "hubspot_create_pipeline": {"crm.pipelines.orders.write"},
+    "hubspot_update_pipeline": {"crm.pipelines.orders.write"},
+    "hubspot_reorder_stages": {"crm.pipelines.orders.write"},
+    "hubspot_create_ticket_pipeline": {"crm.pipelines.orders.write"},
+    "hubspot_get_ticket_pipeline": {"crm.pipelines.orders.read"},
 
     # Users
     "hubspot_list_users": {"settings.users.read"},
@@ -117,45 +119,60 @@ _TOOL_SCOPES: dict[str, set[str] | Any] = {
     "hubspot_update_user": {"settings.users.write"},
     "hubspot_deactivate_user": {"settings.users.write"},
 
-    # Engagements
-    "hubspot_search_engagements": {"crm.objects.engagements.read"},
-    "hubspot_get_engagement": {"crm.objects.engagements.read"},
-    "hubspot_create_call": {"crm.objects.engagements.write"},
-    "hubspot_create_email": {"crm.objects.engagements.write"},
-    "hubspot_create_meeting": {"crm.objects.engagements.write"},
-    "hubspot_create_note": {"crm.objects.engagements.write"},
-    "hubspot_create_task": {"crm.objects.engagements.write"},
+    # Engagements — HubSpot has no single engagements scope; each engagement
+    # type carries its own granular object scope. Read tools need the union.
+    "hubspot_search_engagements": {
+        "crm.objects.notes.read",
+        "crm.objects.calls.read",
+        "crm.objects.meetings.read",
+        "crm.objects.tasks.read",
+        "crm.objects.emails.read",
+        "sales-email-read",
+    },
+    "hubspot_get_engagement": {
+        "crm.objects.notes.read",
+        "crm.objects.calls.read",
+        "crm.objects.meetings.read",
+        "crm.objects.tasks.read",
+        "crm.objects.emails.read",
+        "sales-email-read",
+    },
+    "hubspot_create_call": {"crm.objects.calls.write"},
+    "hubspot_create_email": {"crm.objects.emails.write", "sales-email-read"},
+    "hubspot_create_meeting": {"crm.objects.meetings.write"},
+    "hubspot_create_note": {"crm.objects.notes.write"},
+    "hubspot_create_task": {"crm.objects.tasks.write"},
 
-    # Associations
+    # Associations — tickets use the single `tickets` scope (read+write).
     "hubspot_get_association_schema": {
         "crm.objects.contacts.read",
         "crm.objects.companies.read",
         "crm.objects.deals.read",
-        "crm.objects.tickets.read",
+        "tickets",
     },
     "hubspot_create_association_schema": {
         "crm.objects.contacts.write",
         "crm.objects.companies.write",
         "crm.objects.deals.write",
-        "crm.objects.tickets.write",
+        "tickets",
     },
     "hubspot_associate_records": {
         "crm.objects.contacts.write",
         "crm.objects.companies.write",
         "crm.objects.deals.write",
-        "crm.objects.tickets.write",
+        "tickets",
     },
     "hubspot_disassociate_records": {
         "crm.objects.contacts.write",
         "crm.objects.companies.write",
         "crm.objects.deals.write",
-        "crm.objects.tickets.write",
+        "tickets",
     },
     "hubspot_list_associated_records": {
         "crm.objects.contacts.read",
         "crm.objects.companies.read",
         "crm.objects.deals.read",
-        "crm.objects.tickets.read",
+        "tickets",
     },
 
     # Hygiene (object writes on the target object type)

@@ -18,7 +18,14 @@ async def hubspot_get_engagement(
         resp = await client.get(
             f"/crm/v3/objects/engagements/{quote(engagement_id, safe='')}",
             portal_id=portal_id,
-            expected_scopes=["crm.objects.engagements.read"],
+            expected_scopes=[
+                "crm.objects.notes.read",
+                "crm.objects.calls.read",
+                "crm.objects.meetings.read",
+                "crm.objects.tasks.read",
+                "crm.objects.emails.read",
+                "sales-email-read",
+            ],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
@@ -36,7 +43,14 @@ async def hubspot_search_engagements(
             "/crm/v3/objects/engagements/search",
             portal_id=portal_id,
             body=query,
-            expected_scopes=["crm.objects.engagements.read"],
+            expected_scopes=[
+                "crm.objects.notes.read",
+                "crm.objects.calls.read",
+                "crm.objects.meetings.read",
+                "crm.objects.tasks.read",
+                "crm.objects.emails.read",
+                "sales-email-read",
+            ],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
@@ -61,7 +75,7 @@ async def hubspot_create_note(
             "/crm/v3/objects/engagements",
             portal_id=portal_id,
             body=payload,
-            expected_scopes=["crm.objects.engagements.write"],
+            expected_scopes=["crm.objects.notes.write"],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
@@ -93,7 +107,7 @@ async def hubspot_create_task(
             "/crm/v3/objects/engagements",
             portal_id=portal_id,
             body=payload,
-            expected_scopes=["crm.objects.engagements.write"],
+            expected_scopes=["crm.objects.tasks.write"],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
@@ -119,7 +133,7 @@ async def hubspot_create_email(
             "/crm/v3/objects/engagements",
             portal_id=portal_id,
             body=payload,
-            expected_scopes=["crm.objects.engagements.write"],
+            expected_scopes=["crm.objects.emails.write", "sales-email-read"],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
@@ -145,7 +159,7 @@ async def hubspot_create_meeting(
             "/crm/v3/objects/engagements",
             portal_id=portal_id,
             body=payload,
-            expected_scopes=["crm.objects.engagements.write"],
+            expected_scopes=["crm.objects.meetings.write"],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
@@ -171,7 +185,7 @@ async def hubspot_create_call(
             "/crm/v3/objects/engagements",
             portal_id=portal_id,
             body=payload,
-            expected_scopes=["crm.objects.engagements.write"],
+            expected_scopes=["crm.objects.calls.write"],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:

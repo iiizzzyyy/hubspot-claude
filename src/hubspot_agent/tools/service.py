@@ -62,7 +62,7 @@ async def hubspot_get_ticket_pipeline(
         resp = await client.get(
             f"/crm/v3/pipelines/tickets/{quote(pipeline_id, safe='')}",
             portal_id=portal_id,
-            expected_scopes=["crm.pipelines.read"],
+            expected_scopes=["crm.pipelines.orders.read"],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
@@ -82,7 +82,7 @@ async def hubspot_create_ticket_pipeline(
             "/crm/v3/pipelines/tickets",
             portal_id=portal_id,
             body={"label": label, "displayOrder": display_order, "stages": stages},
-            expected_scopes=["crm.pipelines.write"],
+            expected_scopes=["crm.pipelines.orders.write"],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
@@ -103,7 +103,7 @@ async def hubspot_list_service_automation(
         resp = await client.get(
             f"/automation/v4/workflows{query}",
             portal_id=portal_id,
-            expected_scopes=["automation.workflows.read"],
+            expected_scopes=["automation"],
         )
         return resp.body
     except (HubSpotError, RateLimitError, ScopeError) as exc:
