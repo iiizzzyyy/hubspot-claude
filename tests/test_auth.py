@@ -10,7 +10,7 @@ from hubspot_agent.auth import (
     get_valid_token,
     refresh_access_token,
 )
-from hubspot_agent.config import load_portal_config
+from hubspot_agent.config import PortalConfig, load_portal_config, save_portal_config
 
 
 def test_get_authorization_url_with_credentials(tmp_path, monkeypatch):
@@ -50,6 +50,7 @@ async def test_exchange_code_for_token(respx_mock, monkeypatch, tmp_path):
             "access_token": "new-access-token",
             "refresh_token": "new-refresh-token",
             "expires_in": 21600,
+            "scope": "crm.objects.contacts.read crm.objects.contacts.write",
         })
     )
 
@@ -64,6 +65,12 @@ async def test_exchange_code_for_token(respx_mock, monkeypatch, tmp_path):
     assert portal.token == "new-access-token"
     assert portal.refresh_token == "new-refresh-token"
     assert portal.auth_type == "oauth"
+    # Bug 3 regression: the granted scopes from the token response must be
+    # persisted into PortalConfig so setup's scope-gap report isn't 0/23.
+    assert portal.scopes_granted == [
+        "crm.objects.contacts.read",
+        "crm.objects.contacts.write",
+    ]
 
 
 @pytest.mark.asyncio
@@ -84,6 +91,48 @@ async def test_refresh_access_token(respx_mock, tmp_path, monkeypatch):
 
     result = await refresh_access_token("123", "same-refresh-token")
     assert result["access_token"] == "refreshed-token"
+
+
+@pytest.mark.asyncio
+async def test_refresh_preserves_scopes_when_response_omits_scope(respx_mock, tmp_path, monkeypatch):
+    # Bug 3: a refresh response may omit the `scope` field. The previously
+    # granted scopes must be preserved so the scope-gap report stays accurate
+    # across token refresh, instead of resetting to 0/N granted.
+    from pathlib import Path
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr("hubspot_agent.config.CONFIG_DIR", tmp_path)
+
+    from hubspot_agent.app_credentials import save_app_credentials
+    save_app_credentials("client-123", "secret-456")
+
+    save_portal_config(
+        PortalConfig(
+            portal_id="123",
+            token="old-token",
+            auth_type="oauth",
+            refresh_token="same-refresh-token",
+            scopes_granted=["crm.objects.contacts.read", "crm.objects.contacts.write"],
+        )
+    )
+
+    # Refresh response carries NO `scope` field.
+    respx_mock.post("https://api.hubapi.com/oauth/v1/token").mock(
+        return_value=Response(200, json={
+            "access_token": "refreshed-token",
+            "refresh_token": "same-refresh-token",
+            "expires_in": 21600,
+        })
+    )
+
+    await refresh_access_token("123", "same-refresh-token")
+
+    portal = load_portal_config("123")
+    assert portal is not None
+    assert portal.token == "refreshed-token"
+    assert portal.scopes_granted == [
+        "crm.objects.contacts.read",
+        "crm.objects.contacts.write",
+    ]
 
 
 @pytest.mark.asyncio

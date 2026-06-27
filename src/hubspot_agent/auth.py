@@ -145,6 +145,7 @@ async def exchange_code_for_token(
         access_token=body["access_token"],
         refresh_token=body.get("refresh_token"),
         expires_in=body.get("expires_in", 21600),
+        scopes_granted=body.get("scope", "").split() or None,
     )
     return body
 
@@ -174,6 +175,7 @@ async def refresh_access_token(portal_id: str, refresh_token: str) -> dict[str, 
         access_token=body["access_token"],
         refresh_token=body.get("refresh_token", refresh_token),
         expires_in=body.get("expires_in", 21600),
+        scopes_granted=body.get("scope", "").split() or None,
     )
     return body
 
@@ -199,8 +201,15 @@ def _save_oauth_tokens(
     access_token: str,
     refresh_token: str | None,
     expires_in: int,
+    scopes_granted: list[str] | None = None,
 ) -> None:
     from hubspot_agent.config import PortalConfig
+
+    # A refresh response may omit the ``scope`` field; preserve the previously
+    # granted scopes so the setup scope-gap report stays accurate across refresh.
+    if scopes_granted is None:
+        existing = load_portal_config(portal_id)
+        scopes_granted = existing.scopes_granted if existing else None
 
     portal = PortalConfig(
         portal_id=portal_id,
@@ -208,5 +217,6 @@ def _save_oauth_tokens(
         auth_type="oauth",
         refresh_token=refresh_token,
         expires_at=time.time() + expires_in,
+        scopes_granted=scopes_granted,
     )
     save_portal_config(portal)

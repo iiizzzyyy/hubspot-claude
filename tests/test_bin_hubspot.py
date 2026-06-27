@@ -189,6 +189,29 @@ def test_route_non_tool_goes_to_cli(data_dir, monkeypatch, capsys):
     assert capsys.readouterr().out.strip() == "status-out"
 
 
+def test_route_defaults_working_dir_to_cwd_when_absent(data_dir, monkeypatch, tmp_path, capsys):
+    # Regression: without a --working-dir flag, _strip_global_flags returns
+    # working_dir=None; detect_default_portal(None) used to raise TypeError
+    # (Path(None)). route() must default working_dir to os.getcwd() so status/
+    # setup work from the CLI without an explicit --working-dir.
+    monkeypatch.chdir(tmp_path)
+    seen: dict = {}
+
+    def _fake_detect(wd):
+        seen["wd"] = wd
+        return None
+
+    # _handle_status uses cli.py's module-level binding, so patch that, not the
+    # config-module attribute (cli.py already bound the name at import time).
+    monkeypatch.setattr("hubspot_agent.cli.detect_default_portal", _fake_detect)
+    # Exercise the real hubspot_command → _handle_status path (no portal → safe
+    # early return), not a stub, so a None working_dir would surface as TypeError.
+    assert router.route(["status"]) == 0
+    assert seen["wd"] is not None
+    assert seen["wd"] == str(tmp_path)
+    assert "No default portal" in capsys.readouterr().out
+
+
 def test_route_serve_stop_alive(data_dir, monkeypatch, capsys):
     monkeypatch.setattr(router, "is_daemon_alive", lambda: True)
     called: list = []

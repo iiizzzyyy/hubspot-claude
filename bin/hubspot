@@ -11,6 +11,14 @@
 #   3. glob ~/.claude/plugins/data/hubspot-*/venv/bin/python
 #   4. system python3 (package may not be installed → router import errors)
 #      On total failure, print a pointer to install.log and exit 127.
+#
+# Self-heal (stale-venv-on-update): a /plugin update swaps the cache (new
+# pyproject.toml + new bin/hubspot) within a session, but the SessionStart
+# install hook doesn't re-run until next session — so the venv would keep the
+# old package until the session restarts.  Before exec'ing the router we
+# compare the venv's installed hubspot-agent version against the bundled
+# pyproject.toml and reinstall the venv from $CLAUDE_PLUGIN_ROOT on drift.
+# Never blocks: any failure falls through to the normal exec.
 set -u
 
 CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA:-$HOME/.claude/plugins/data/hubspot}"
@@ -38,6 +46,31 @@ if [ -z "$PY" ]; then
     echo "hubspot: see $CLAUDE_PLUGIN_DATA/install.log or re-run the SessionStart hook." >&2
     exit 127
   fi
+fi
+
+# --- Self-heal: reinstall the venv when its installed version doesn't match
+# the bundled pyproject.toml.  Closes the stale-venv window after a /plugin
+# update (see header).  All paths are best-effort; any failure falls through to
+# the normal exec below so a self-heal glitch never blocks the command.
+_expected_ver=""
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$CLAUDE_PLUGIN_ROOT/pyproject.toml" ]; then
+  _expected_ver=$(grep -E '^version[[:space:]]*=' "$CLAUDE_PLUGIN_ROOT/pyproject.toml" 2>/dev/null \
+    | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+fi
+if [ -n "$_expected_ver" ]; then
+  _installed_ver=$("$PY" -c "import importlib.metadata as m; print(m.version('hubspot-agent'), end='')" 2>/dev/null || true)
+  if [ "$_installed_ver" != "$_expected_ver" ]; then
+    _pip=$(dirname "$PY")/pip
+    if [ -x "$_pip" ]; then
+      "$_pip" install --quiet "$CLAUDE_PLUGIN_ROOT" >>"$CLAUDE_PLUGIN_DATA/install.log" 2>&1 || true
+    fi
+  fi
+fi
+
+# HUBSPOT_NO_EXEC=1 is a test seam: run the resolver + self-heal, then stop
+# short of exec'ing the router (used only by the self-heal unit test).
+if [ "${HUBSPOT_NO_EXEC:-0}" = "1" ]; then
+  exit 0
 fi
 
 exec "$PY" -m hubspot_agent.router "$@"

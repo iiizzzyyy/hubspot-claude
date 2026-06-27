@@ -264,6 +264,8 @@ def route(argv: list[str]) -> int:
     from hubspot_agent.config import detect_default_portal
 
     remaining, working_dir, portal_id = _strip_global_flags(list(argv))
+    if working_dir is None:
+        working_dir = os.getcwd()
     if not remaining:
         print(_cli_fallback(remaining, working_dir, portal_id))
         return 0
