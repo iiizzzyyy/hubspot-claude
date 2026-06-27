@@ -47,3 +47,29 @@ async def invoke_tool(tool_name: str, portal_id: str, **kwargs: Any) -> Any:
         result = tool_def.func(**kwargs)
 
     return result
+
+
+def _import_all_submodules() -> None:
+    """Import every submodule in this package so its ``@tool`` decorators run.
+
+    The registry is populated by decorator side effects at import time.  Any
+    process that imports ``hubspot_agent.tools`` without also importing the
+    tool submodules sees an empty registry — notably the warm-client daemon
+    subprocess (``python -m hubspot_agent.daemon`` → ``handlers`` → this
+    package, but never ``agents/*``), which therefore rejected every tool call
+    with ``Unknown tool``.  Walking the package here makes a populated registry
+    an invariant of importing ``hubspot_agent.tools``, regardless of which
+    entrypoint did the import.  Submodules only need the ``tool`` decorator
+    (defined above) plus leaf modules (client/cache/models/…), none of which
+    import this package back, so there is no import cycle.
+    """
+    import importlib
+    import pkgutil
+    from pathlib import Path
+
+    pkg_dir = Path(__file__).resolve().parent
+    for _mod in pkgutil.iter_modules([str(pkg_dir)]):
+        importlib.import_module(f"{__name__}.{_mod.name}")
+
+
+_import_all_submodules()
